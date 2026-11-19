@@ -180,10 +180,34 @@ class _UpdatePageState extends State<UpdatePage> {
       _installedPath = null;
     });
 
-    // 缓存目录：用 Directory.systemTemp 的应用私有部分。
-    // Android 上 Flutter 的临时目录就是 cacheDir，正好落在
-    // FileProvider 暴露的 updates/ 下。
-    final cacheDir = Directory(Directory.systemTemp.path);
+    /*
+     * ⚠️ 下载目录必须和 FileProvider 的映射**严格对应**。
+     *
+     * 踩过两次：
+     *
+     *  1. 用 `Directory.systemTemp` —— 它在 Android 上映射到 **code_cache**，
+     *     不是 cache。而 FileProvider 配的是 `cache-path`（对应 cacheDir），
+     *     两者对不上，拉起安装器时报：
+     *
+     *       IllegalArgumentException: Failed to find configured root
+     *       that contains /data/data/<pkg>/code_cache/updates/xxx.apk
+     *
+     *     表现是「下载成功，点安装瞬间失败」。
+     *
+     *  2. 而 `cache-path` 这个 XML 元素**只能**映射 `<cacheDir>`，
+     *     没法映射 code_cache（要映射得用 root-path，那就等于放开整块磁盘）。
+     *
+     * 所以正确做法是从源头把目录钉死在 cacheDir：
+     * 用 MethodChannel 问原生要 `getCacheDir()`，保证和 file_paths.xml 一致。
+     */
+    final cachePath = await Installer.cacheDirPath();
+    if (!mounted) return;
+    if (cachePath == null) {
+      setState(() => _downloading = false);
+      _say('拿不到缓存目录，无法下载', error: true);
+      return;
+    }
+    final cacheDir = Directory(cachePath);
 
     final file = await _api.download(
       info: info,

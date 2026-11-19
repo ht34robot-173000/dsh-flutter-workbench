@@ -7,15 +7,28 @@
     否则抛 FileUriExposedException。安装 APK 必须给 content:// URI，
     而 content:// 只能通过 FileProvider 暴露指定的目录。
 
-  暴露范围刻意**最小**：只给 cacheDir/updates/ 这一层。
-  不要写 <root-path> 或 <external-path> 之类 ——
-  那等于把整个存储对外开放，是安全隐患。
+  ⚠️ 这里曾配错一次（2026-11-20 实测）：
+    只配了 `cache-path`，但 Dart 的 `Directory.systemTemp` 在 Android 上
+    **映射到 code_cache，不是 cache**。APK 实际落在
+    `/data/user/0/<pkg>/code_cache/updates/`，于是报：
 
-  `cacheDir` 在 Flutter/Android 里对应 XML 的 cache-path 类型。
+      IllegalArgumentException: Failed to find configured root
+      that contains /data/data/<pkg>/code_cache/updates/xxx.apk
+
+    两个都要配，否则「下载成功但安装瞬间失败」。
+
+  暴露范围刻意**最小**：只给这两个缓存目录下的 updates/ 子目录。
+  不要写 <root-path> 或 <external-path> ——
+  那等于把整个存储对外开放，是安全隐患。
 -->
 <paths>
-    <!-- 下载的 APK 放这里：context.cacheDir/updates/ -->
+    <!-- Dart Directory.systemTemp 在 Android 上指向这里 -->
     <cache-path
-        name="updates"
+        name="code_cache_updates"
+        path="updates/" />
+
+    <!-- 兜底：某些 Flutter 版本 / 平台上 systemTemp 走 cacheDir -->
+    <cache-path
+        name="cache_updates"
         path="updates/" />
 </paths>

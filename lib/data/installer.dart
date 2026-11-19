@@ -44,6 +44,27 @@ class Installer {
     } catch (_) {}
   }
 
+  /// 拿应用私有 `cacheDir` 的绝对路径。
+  ///
+  /// ⚠️ 不能用 `Directory.systemTemp` —— 它在 Android 上映射到 **code_cache**，
+  /// 不是 cacheDir。而 FileProvider 的 `cache-path` 只能映射 cacheDir，
+  /// 两者对不上就会在拉起安装器时报：
+  ///
+  ///   IllegalArgumentException: Failed to find configured root
+  ///   that contains `/data/data/{pkg}/code_cache/updates/xxx.apk`
+  ///
+  /// 表现是「下载成功，点安装瞬间失败」。
+  ///
+  /// 所以目录一律从原生问，保证和 file_paths.xml 严格一致。
+  static Future<String?> cacheDirPath() async {
+    if (!Platform.isAndroid) return null;
+    try {
+      return await _ch.invokeMethod<String>('cacheDir');
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// 用系统安装器装上指定 APK。
   ///
   /// 返回 `null` 表示成功调起；返回字符串表示失败原因。

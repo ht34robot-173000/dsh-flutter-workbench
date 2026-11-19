@@ -42,6 +42,19 @@ class MainActivity : FlutterActivity() {
                 when (call.method) {
                     "canInstall" -> result.success(canInstall())
 
+                    /*
+                     * 返回 cacheDir 的绝对路径。
+                     *
+                     * 为什么让原生给：Dart 的 `Directory.systemTemp` 在 Android 上
+                     * 映射到 **code_cache**，而 FileProvider 的 `cache-path`
+                     * 只能映射 cacheDir —— 两者对不上会让安装器报
+                     * 「Failed to find configured root」。
+                     *
+                     * 目录必须和 res/xml/file_paths.xml 的映射严格一致，
+                     * 所以从这一侧给，避免 Dart 猜错。
+                     */
+                    "cacheDir" -> result.success(cacheDir.absolutePath)
+
                     "openInstallSettings" -> {
                         openInstallSettings()
                         result.success(null)
