@@ -13,7 +13,7 @@ library;
 
 /// 一次成功解析的结果。
 class PairScanResult {
-  /// 从二维码里读到的基础地址，例如 `https://dsh.ht34robot.cyou`。
+  /// 从二维码里读到的基础地址，例如 `https://dsh.example.com`。
   /// 已去掉末尾斜杠和 `/rw/pair` 那段路径。
   final String baseUrl;
 
@@ -96,3 +96,4 @@ PairScanResult? parsePairQr(String? raw) {
 
   return PairScanResult(baseUrl: base, code: code);
 }
+

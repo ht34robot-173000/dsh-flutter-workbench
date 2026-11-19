@@ -12,9 +12,9 @@ import 'package:dsh_workbench/data/scan_parse.dart';
 void main() {
   group('parsePairQr 正常路径', () {
     test('标准格式：https + 域名 + code', () {
-      final r = parsePairQr('https://dsh.ht34robot.cyou/rw/pair?code=123456');
+      final r = parsePairQr('https://dsh.example.com/rw/pair?code=123456');
       expect(r, isNotNull);
-      expect(r?.baseUrl, 'https://dsh.ht34robot.cyou');
+      expect(r?.baseUrl, 'https://dsh.example.com');
       expect(r?.code, '123456');
     });
 
@@ -103,3 +103,4 @@ void main() {
     });
   });
 }
+

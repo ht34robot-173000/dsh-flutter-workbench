@@ -591,6 +591,13 @@ class _SettingsPageState extends State<SettingsPage> {
                   onSelectionChanged: (v) => setState(() => _mode = v.first),
                 ),
                 const SizedBox(height: 14),
+                /*
+                 * hintText 必须是**通用示例**，不能写作者的真实地址。
+                 *
+                 * 这里曾经填的是作者家里的局域网 IP 和真实公网域名 ——
+                 * 两个问题：① 泄露私有网络拓扑；② 新用户会误以为那是
+                 * 预填好的值，直接点保存然后连不上，还以为是软件坏了。
+                 */
                 TextField(
                   controller: _lan,
                   decoration: const InputDecoration(
@@ -604,7 +611,7 @@ class _SettingsPageState extends State<SettingsPage> {
                   controller: _wan,
                   decoration: const InputDecoration(
                     labelText: '公网地址',
-                    hintText: 'https://dsh.ht34robot.cyou',
+                    hintText: 'https://dsh.example.com',
                     border: OutlineInputBorder(),
                   ),
                 ),
