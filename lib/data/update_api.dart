@@ -205,6 +205,23 @@ class UpdateApi {
         }
       }
 
+      /*
+       * ⚠️ Release **没有附件**时，回落到仓库根目录找 APK。
+       *
+       * 为什么需要这条：本机 `uploads.github.com` 被 DNS 解析到 127.0.0.1
+       * （污染），Release assets 的 POST 端点完全不可达。
+       * 所以发布流程改成把 APK 放仓库根目录 + 用 Contents API 上传 ——
+       * 那条路走 api.github.com，反代可用。
+       *
+       * 不认这个回落的话，明明发不了 assets 就会导致
+       * 「有新版本但找不到 APK」，更新功能等于废掉。
+       */
+      if (apkUrl.isEmpty) {
+        final fallback = await _findApkInRepo(tag);
+        apkUrl = fallback.$1;
+        size = fallback.$2;
+      }
+
       final newer = compareVersion(tag, currentVersion) > 0;
       return UpdateInfo(
         hasUpdate: newer && apkUrl.isNotEmpty,
@@ -221,6 +238,65 @@ class UpdateApi {
         currentVersion: currentVersion,
         error: _describeError(e),
       );
+    } finally {
+      c?.close(force: true);
+    }
+  }
+
+  /// 在仓库根目录找 `.apk` 文件。
+  ///
+  /// 用途：Release 没有 assets 时的回落方案（本机 assets 上传端点被 DNS 阻断，
+  /// APK 只能放仓库根目录走 Contents API）。
+  ///
+  /// 返回 `(下载地址, 大小)`；找不到返回 `('', 0)`。
+  Future<(String, int)> _findApkInRepo(String tag) async {
+    HttpClient? c;
+    try {
+      c = _client(connect: const Duration(seconds: 12));
+      final req = await c.getUrl(
+        Uri.parse('$apiBase/repos/$repo/contents/'),
+      );
+      req.headers.set('Accept', 'application/vnd.github+json');
+      if (token.isNotEmpty) {
+        req.headers.set('Authorization', 'Bearer $token');
+      }
+      final res = await req.close();
+      if (res.statusCode != 200) {
+        await res.drain<void>();
+        return ('', 0);
+      }
+      final body = await res.transform(utf8.decoder).join();
+      final list = jsonDecode(body);
+      if (list is! List) return ('', 0);
+
+      /*
+       * 优先选文件名里带当前版本号的，避免仓库里同时存在多个 APK 时
+       * 拿到旧的那个（比如 v0.6.0 和 v0.6.1 并存）。
+       */
+      String bestUrl = '';
+      int bestSize = 0;
+      var bestScore = -1;
+
+      for (final f in list) {
+        if (f is! Map) continue;
+        final name = (f['name'] ?? '').toString();
+        if (!name.toLowerCase().endsWith('.apk')) continue;
+
+        final dl = (f['download_url'] ?? '').toString();
+        if (dl.isEmpty) continue;
+        final sz = (f['size'] is num) ? (f['size'] as num).toInt() : 0;
+
+        // 带版本号的优先
+        final score = name.contains(tag) ? 2 : 1;
+        if (score > bestScore) {
+          bestScore = score;
+          bestUrl = dl;
+          bestSize = sz;
+        }
+      }
+      return (bestUrl, bestSize);
+    } catch (_) {
+      return ('', 0);
     } finally {
       c?.close(force: true);
     }
