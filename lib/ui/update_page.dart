@@ -399,7 +399,7 @@ class _UpdatePageState extends State<UpdatePage> {
               decoration: InputDecoration(
                 labelText: '仓库（owner/repo）',
                 labelStyle: TextStyle(fontSize: 12, color: c.textTertiary),
-                hintText: '173ababah/dsh-mobile',
+                hintText: 'ht34robot-173000/dsh-flutter-workbench',
                 isDense: true,
                 filled: true,
                 fillColor: c.inputFill,

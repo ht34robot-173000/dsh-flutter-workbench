@@ -106,8 +106,8 @@ const List<String> githubMirrors = [
 ];
 
 class UpdateApi {
-  /// 仓库全名。和 Kotlin 版一致 —— 源码和 Release 同仓库，不容易漏发。
-  static const String defaultRepo = '173ababah/dsh-mobile';
+  /// 仓库全名。源码和 Release 同仓库，不容易漏发。
+  static const String defaultRepo = 'ht34robot-173000/dsh-flutter-workbench';
 
   /// ✅ **恒为空。绝不要在源码里写死任何凭据。**
   static const String token = '';
@@ -369,4 +369,5 @@ class UpdateApi {
     return null; // 所有源都失败
   }
 }
+
 

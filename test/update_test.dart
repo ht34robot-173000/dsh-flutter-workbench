@@ -87,7 +87,7 @@ void main() {
     });
 
     test('默认仓库名', () {
-      expect(UpdateApi.defaultRepo, '173ababah/dsh-mobile');
+      expect(UpdateApi.defaultRepo, 'ht34robot-173000/dsh-flutter-workbench');
     });
 
     test('apiBase 可注入（国内 api.github.com 常不可达）', () {
@@ -135,3 +135,4 @@ void main() {
     });
   });
 }
+

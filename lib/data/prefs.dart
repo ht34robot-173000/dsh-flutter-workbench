@@ -111,7 +111,7 @@ class Prefs {
   /// 更新用的仓库，`owner/repo` 形式。空串用默认。
   String get updateRepo {
     final v = (_sp.getString(_kUpdateRepo) ?? '').trim();
-    return v.isEmpty ? '173ababah/dsh-mobile' : v;
+    return v.isEmpty ? 'ht34robot-173000/dsh-flutter-workbench' : v;
   }
 
   Future<void> setUpdateRepo(String v) =>
@@ -176,3 +176,4 @@ class Prefs {
     return 'http://$s';
   }
 }
+
