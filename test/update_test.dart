@@ -108,6 +108,31 @@ void main() {
     });
   });
 
+  group('配置生效：api 必须用输入框的值，不是初始值', () {
+    /*
+     * 回归测试：早先 `_rebuildApi()` 读的是 `widget.repo` / `widget.apiBase`，
+     * 那是 initState 时传进来的**初始值**，用户改了输入框它不会变。
+     *
+     * 表现：配置区显示新仓库，点「检查更新」却还在查旧仓库 ——
+     * 用户看到的是「保存没生效」。
+     *
+     * 这里测的是 UpdateApi 构造本身：给它什么就用什么。
+     * 真正的「输入框 → api」绑定在 UI 层，靠模拟器验证。
+     */
+    test('构造时传入的 repo/api 被如实保留', () {
+      final a = UpdateApi(repo: 'new-owner/new-repo', apiBase: 'https://mirror.example.com');
+      expect(a.repo, 'new-owner/new-repo');
+      expect(a.apiBase, 'https://mirror.example.com');
+    });
+
+    test('两个实例互不影响（不共享状态）', () {
+      final a = UpdateApi(repo: 'a/b');
+      final b = UpdateApi(repo: 'c/d');
+      expect(a.repo, 'a/b');
+      expect(b.repo, 'c/d');
+    });
+  });
+
   group('仓库不可用时必须报错，不能显示「已是最新」', () {
     /*
      * 这一组是回归测试：GitHub 对「仓库不存在」和「没有 release」
@@ -135,4 +160,5 @@ void main() {
     });
   });
 }
+
 

@@ -82,8 +82,19 @@ class _UpdatePageState extends State<UpdatePage> {
     super.dispose();
   }
 
+  /// 用**当前输入框里的值**重建 api。
+  ///
+  /// ⚠️ 不能读 `widget.repo` / `widget.apiBase` —— 那是 initState 时传进来的
+  /// 初始值，用户改了输入框它们不会变。早先写成读 widget 的，结果：
+  /// 配置区显示新仓库，但「检查更新」还在查旧仓库，报
+  /// 「仓库 173ababah/dsh-mobile 不存在」—— 用户看到的是「保存没生效」。
   void _rebuildApi() {
-    _api = UpdateApi(apiBase: widget.apiBase, repo: widget.repo);
+    final repo = _repoCtrl.text.trim();
+    final api = _apiCtrl.text.trim();
+    _api = UpdateApi(
+      apiBase: api.isEmpty ? 'https://api.github.com' : api,
+      repo: repo.isEmpty ? UpdateApi.defaultRepo : repo,
+    );
   }
 
   /// 保存仓库/API 配置。
@@ -375,7 +386,7 @@ class _UpdatePageState extends State<UpdatePage> {
           ),
           const SizedBox(height: 8),
           Text(
-            '仓库 ${widget.repo} · 源 ${widget.apiBase}',
+            '仓库 ${_api.repo} · 源 ${_api.apiBase}',
             style: TextStyle(fontSize: 10.5, color: c.textTertiary),
           ),
           const SizedBox(height: 6),

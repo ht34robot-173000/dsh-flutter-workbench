@@ -8,7 +8,7 @@ publish_to: 'none'
 # 阶段对应：
 #   0.1.0 —— 阶段① 连接与配对
 #   0.2.0 —— 阶段② 会话列表（Mica 背景 + 自有图标库）
-version: 0.6.3+603
+version: 0.7.0+700
 
 environment:
   sdk: ^3.9.2
@@ -59,6 +59,8 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+
+
 
 
 
