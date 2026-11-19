@@ -1,0 +1,69 @@
+name: dsh_workbench
+description: "DSH 工作台（Flutter 版）—— 手机端远程操作本机 DeepSeek Harness。"
+publish_to: 'none'
+
+# 版本策略沿用 Kotlin 版：语义版本 + buildNumber 派生 versionCode。
+# 改版本只改这里，Android 的 versionName/versionCode 由 flutter 插件自动带上。
+#
+# 阶段对应：
+#   0.1.0 —— 阶段① 连接与配对
+#   0.2.0 —— 阶段② 会话列表（Mica 背景 + 自有图标库）
+version: 0.6.0+600
+
+environment:
+  sdk: ^3.9.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # HTTP：DSH 的 /rw/api/* 都是 POST + JSON，只需要一个够直白的客户端。
+  # 用 dio 而不是 http：dio 自带超时、拦截器、请求取消，
+  # 后面做 SSE 和文件上传（分块 + 进度）时不用自己撸。
+  dio: ^5.7.0
+
+  # 本地持久化：服务器地址、模式、cookie、主题。
+  # 用 shared_preferences 与 Kotlin 版同构（都是 key-value），
+  # 迁移时字段名可以直接对齐，排查问题不用换算。
+  shared_preferences: ^2.3.3
+
+  # 扫码配对：mobile_scanner 底层就是 CameraX + MLKit，
+  # 和 Kotlin 版直接引 CameraX+ZXing 是同一套硬件路径。
+  mobile_scanner: ^6.0.2
+
+  # Markdown 渲染。选 flutter_markdown 是因为它支持自定义 builder，
+  # 表格和代码块都能自己接管 —— Kotlin 版那套「自绘 TableLayout + 自研代码块」
+  # 的经验可以直接搬过来。
+  flutter_markdown: ^0.7.5
+
+  # 代码高亮（Kotlin 版自研过一版，Flutter 这边有现成的）
+  flutter_highlight: ^0.7.0
+  highlight: ^0.7.0
+
+  # 文件选择 / 保存
+  file_picker: ^8.1.6
+
+  # 打开系统安装器（App 内更新）
+  open_filex: ^4.5.0
+
+  # 设备信息（更新器要读当前 versionCode 比对）
+  package_info_plus: ^8.1.2
+
+  # 随机数 / 摘要（cookie 校验、下载校验）
+  crypto: ^3.0.6
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true
+
+
+
+
+
+
+
+

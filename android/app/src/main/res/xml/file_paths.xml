@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  应用内更新用的 FileProvider 路径映射。
+
+  为什么需要这个：
+    Android 7.0 起禁止用 file:// URI 跨应用传文件，
+    否则抛 FileUriExposedException。安装 APK 必须给 content:// URI，
+    而 content:// 只能通过 FileProvider 暴露指定的目录。
+
+  暴露范围刻意**最小**：只给 cacheDir/updates/ 这一层。
+  不要写 <root-path> 或 <external-path> 之类 ——
+  那等于把整个存储对外开放，是安全隐患。
+
+  `cacheDir` 在 Flutter/Android 里对应 XML 的 cache-path 类型。
+-->
+<paths>
+    <!-- 下载的 APK 放这里：context.cacheDir/updates/ -->
+    <cache-path
+        name="updates"
+        path="updates/" />
+</paths>
