@@ -55,6 +55,12 @@ class AppState extends ChangeNotifier {
   bool? revealToDark;
   Offset? revealOrigin;
 
+  /// 一轮揭示动画是否还在进行（从点击到动画结束）。
+  ///
+  /// 专门用来挡连点：`revealToDark` 在抓帧完成后就被清空了，
+  /// 光看它判断不出「动画还在播」，连点会叠出两次主题翻转 → 屏闪。
+  bool revealBusy = false;
+
   bool ready = false;
 
   /// 列表里是否显示「未分组」「已归档」两个分组（侧边栏可切，落盘在 Prefs）。
@@ -89,6 +95,37 @@ class AppState extends ChangeNotifier {
     // 前台服务：App 退到后台后进程不被回收，SSE 长连接能一直挂着
     await alive.KeepAlive.start();
     await checkConnection();
+    _watchHealth();
+  }
+
+  /// 断线自动复查。
+  ///
+  /// 为什么需要：手机端从抽屉点「重启 DSH」之后，桌面要 10-40 秒才回来
+  /// （宿主要退、relaunch.ps1 拉起新实例、cloudflared 还要重新注册隧道）。
+  /// 这期间每个请求都失败，而 App 原先**没有任何重试** ——
+  /// 表现就是「一直转圈、永远连不上」，只能杀进程重开。
+  ///
+  /// 现在每 4 秒复查一次；一旦连上，顺手把会话缓存清掉重拉，
+  /// 用户看到的是「等一会儿自己好了」。
+  Timer? _health;
+  void _watchHealth() {
+    _health?.cancel();
+    _health = Timer.periodic(const Duration(seconds: 4), (_) async {
+      if (connOk == true) return;
+      final was = connOk;
+      await checkConnection();
+      if (connOk == true && was != true) {
+        // 刚恢复：旧列表作废，重新拉一次
+        SessionStore.instance.reset();
+        await SessionStore.instance.load(api, force: true);
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _health?.cancel();
+    super.dispose();
   }
 
   Future<void> checkConnection() async {
@@ -117,6 +154,16 @@ class AppState extends ChangeNotifier {
   /// 三档轮换 system→light→dark 里，白天（系统浅色）时
   /// 「system(浅)→light(浅)」界面毫无变化，用户以为按钮坏了。
   void toggleTheme({Offset? origin}) {
+    /*
+     * 连点保护：从「点击」到「动画播完」这一整段里，再点直接忽略。
+     *
+     * 揭示流程是「抓帧 → 切主题 → 播 460ms」。抓完帧 `commitTheme` 立刻把
+     * `revealToDark` 清成 null，所以光看它判断不出「动画还在播」。连点时第二轮会：
+     *   抓到新画面 → 立刻 commit（主题又翻一次）→ 快照被上一轮的控制器顶掉
+     * 屏幕表现就是亮→暗→亮、中间没有过渡 —— 也就是用户说的**屏闪**。
+     */
+    if (revealBusy || revealToDark != null) return;
+    revealBusy = true;
     revealToDark = !dark;
     revealOrigin = origin;
     notifyListeners();
@@ -140,6 +187,8 @@ class AppState extends ChangeNotifier {
 
   /// 动画播完（快照已释放）。只回收圆心，不再动主题。
   void finishReveal() {
+    // 动画彻底结束才放开连点保护（抓帧失败走的瞬时分支也会走到这里）
+    revealBusy = false;
     if (revealOrigin == null && revealToDark == null) return;
     revealOrigin = null;
     revealToDark = null;
@@ -1113,7 +1162,6 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 }
-
 
 
 

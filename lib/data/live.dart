@@ -27,6 +27,7 @@
 library;
 
 import 'dart:async';
+import 'dart:math' as math;
 import 'dart:convert';
 import 'dart:io';
 
@@ -50,6 +51,18 @@ class LiveClient {
   /// （异常抛在 `initState` 里，界面只剩状态栏）。
   /// 所以这里记一笔，交出去过就在下次 `connect()` 重新开一条。
   bool _handed = false;
+
+  /* ---------------- 自动重连 ---------------- */
+
+  /// 重连计时器。连接断了之后定时重开，而不是躺着等用户杀进程。
+  Timer? _retry;
+  Timer? get retryTimer => _retry;
+
+  /// 退避时长：3s → 6s → 12s → 30s 封顶。
+  Duration _backoff = const Duration(seconds: 3);
+
+  /// 主动 close（用户退出页面）时不再重连。
+  bool _closedByUser = false;
 
   LiveClient(this.prefs);
 
@@ -123,14 +136,43 @@ class LiveClient {
       final resp = await req.close();
       if (resp.statusCode != 200) {
         if (!ctrl.isClosed) ctrl.add(const LiveStatus('', false));
+        // 宿主刚重启时这里大概率是 502/530（隧道还没回来）→ 交给重连
+        _scheduleRetry(ctrl);
         return;
       }
+
+      // 连上了：退避归零，下次断线还从 3 秒开始
+      _backoff = const Duration(seconds: 3);
 
       // HttpClientResponse 本身就是逐块吐字节的 Stream<List<int>>
       _lineSub = _pump(resp, ctrl);
     } catch (e) {
       if (!ctrl.isClosed) ctrl.add(const LiveStatus('', false));
+      _scheduleRetry(ctrl);
     }
+  }
+
+  /// 排一次重连。
+  ///
+  /// 为什么要它：宿主（或隧道）重启后，旧的 SSE 是**已经死掉的 socket**，
+  /// 不重开就永远收不到帧 —— 界面上表现就是「一直转圈 / 任务跑完了没反应」，
+  /// 用户只能杀进程。这条重连让 App 自己缓过来。
+  void _scheduleRetry(StreamController<LiveFrame> ctrl) {
+    if (_closedByUser || ctrl.isClosed) return;
+    _retry?.cancel();
+    final wait = _backoff;
+    _retry = Timer(wait, () {
+      if (_closedByUser || ctrl.isClosed) return;
+      // 退避翻倍，封顶 30 秒
+      _backoff = Duration(
+        seconds: math.min(_backoff.inSeconds * 2, 30),
+      );
+      unawaited(_lineSub?.cancel());
+      _lineSub = null;
+      _client?.close(force: true);
+      _client = null;
+      _start(ctrl);
+    });
   }
 
   /// 逐块读字节 → 按行切 → 解析 `data:` 行。
@@ -166,6 +208,7 @@ class LiveClient {
       },
       onError: (Object e) {
         if (!ctrl.isClosed) ctrl.add(const LiveStatus('', false));
+        _scheduleRetry(ctrl);
       },
       onDone: () {
       },
@@ -176,6 +219,9 @@ class LiveClient {
   /// 关闭。**必须在页面 dispose 里调**，否则连接泄漏、后台还在收数据；
   /// 更要紧的是：不关掉的话**下一条流没法重新开**（见 `_handed`）。
   Future<void> close() async {
+    _closedByUser = true;
+    _retry?.cancel();
+    _retry = null;
     await _lineSub?.cancel();
     _lineSub = null;
     _client?.close(force: true);
