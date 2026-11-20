@@ -29,6 +29,7 @@ import '../data/chat_data.dart';
 import '../data/ds_api.dart';
 import '../data/live.dart';
 import 'icons.dart';
+import 'markdown_view.dart';
 import 'question_panel.dart';
 import 'theme.dart';
 
@@ -619,14 +620,28 @@ class _ChatPageState extends State<ChatPage> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Text(
-                    m.text,
-                    style: TextStyle(
-                      fontSize: 13.5,
-                      height: 1.45,
-                      color: c.textPrimary,
-                    ),
-                  ),
+                  /*
+                   * 正文渲染：
+                   *   助手消息 → **Markdown**（宿主返回的就是标准 Markdown：
+                   *              `**粗体**`、行内代码、`## 标题`、表格）
+                   *   用户消息 → 纯文本。用户打的多半是口语，把 `*` `_` `|`
+                   *              当语法解析反而会吃掉字符（比如发一个 `2*3*4`
+                   *              会变成斜体）。要等宽/形状的场合本来就少。
+                   *
+                   * 流式期间也走 Markdown：这样「生成中」的正文和落地后
+                   * 长得一模一样，不会在 assistant/message 到达的瞬间重排一次。
+                   */
+                  if (isUser)
+                    Text(
+                      m.text,
+                      style: TextStyle(
+                        fontSize: 13.5,
+                        height: 1.45,
+                        color: c.textPrimary,
+                      ),
+                    )
+                  else
+                    DshMarkdown(m.text, c: c, bubble: true),
                   if (m.streaming) ...[
                     const SizedBox(height: 6),
                     Row(
