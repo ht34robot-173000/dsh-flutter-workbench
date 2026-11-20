@@ -21,7 +21,16 @@ class FileBrowserPage extends StatefulWidget {
   final FsApi fs;
   final bool dark;
 
-  const FileBrowserPage({super.key, required this.fs, required this.dark});
+  /// 打开时直接进这个目录（对话里点路径进来时用）。
+  /// 空串 = 老行为：从盘符列表开始。
+  final String initialPath;
+
+  const FileBrowserPage({
+    super.key,
+    required this.fs,
+    required this.dark,
+    this.initialPath = '',
+  });
 
   @override
   State<FileBrowserPage> createState() => _FileBrowserPageState();
@@ -37,7 +46,8 @@ class _FileBrowserPageState extends State<FileBrowserPage> {
   @override
   void initState() {
     super.initState();
-    _load('');
+    // 从对话里点路径进来时直奔目标目录；否则还是盘符列表
+    _load(widget.initialPath);
   }
 
   Future<void> _load(String path) async {
@@ -65,10 +75,12 @@ class _FileBrowserPageState extends State<FileBrowserPage> {
     if (!mounted) return;
     ScaffoldMessenger.of(context)
       ..clearSnackBars()
-      ..showSnackBar(SnackBar(
-        content: Text(msg.trim().isEmpty ? '完成' : msg),
-        duration: const Duration(seconds: 2),
-      ));
+      ..showSnackBar(
+        SnackBar(
+          content: Text(msg.trim().isEmpty ? '完成' : msg),
+          duration: const Duration(seconds: 2),
+        ),
+      );
   }
 
   /* ---------------- 操作 ---------------- */
@@ -226,11 +238,7 @@ class _FileBrowserPageState extends State<FileBrowserPage> {
         _toast('请先进到某个目录再上传');
         return;
       }
-      final r = await widget.fs.upload(
-        dir: _path,
-        name: f.name,
-        bytes: bytes,
-      );
+      final r = await widget.fs.upload(dir: _path, name: f.name, bytes: bytes);
       if (!mounted) return;
       if (r.ok) {
         _toast('已上传 ${f.name}');
@@ -289,15 +297,15 @@ class _FileBrowserPageState extends State<FileBrowserPage> {
     final stamp = DateTime.now().millisecondsSinceEpoch;
     // 加时间戳前缀，避免重名覆盖
     final fileName = '${stamp}_$safe';
-    for (final dir in [
-      '/storage/emulated/0/Download',
-      '/sdcard/Download',
-    ]) {
+    for (final dir in ['/storage/emulated/0/Download', '/sdcard/Download']) {
       try {
         final d = Directory(dir);
         if (!d.existsSync()) d.createSync(recursive: true);
         final file = File('$dir/$fileName');
-        file.writeAsBytesSync(bytes.map((e) => e.toInt()).toList(), flush: true);
+        file.writeAsBytesSync(
+          bytes.map((e) => e.toInt()).toList(),
+          flush: true,
+        );
         if (file.existsSync() && file.lengthSync() > 0) return file.path;
       } catch (_) {
         // 换下一个候选目录
@@ -355,9 +363,7 @@ class _FileBrowserPageState extends State<FileBrowserPage> {
   /// 正确做法：末尾有分隔符就不再补，只补名字。
   static String _join(String dir, String name, String sep) {
     if (dir.isEmpty) return name;
-    final hasSep = dir.endsWith(sep) ||
-        dir.endsWith('/') ||
-        dir.endsWith('\\');
+    final hasSep = dir.endsWith(sep) || dir.endsWith('/') || dir.endsWith('\\');
     return hasSep ? '$dir$name' : '$dir$sep$name';
   }
 
@@ -415,7 +421,11 @@ class _FileBrowserPageState extends State<FileBrowserPage> {
             ),
             ListTile(
               titleAlignment: ListTileTitleAlignment.center,
-              leading: DshIcon(DshGlyph.fileText, size: 20, color: c.textPrimary),
+              leading: DshIcon(
+                DshGlyph.fileText,
+                size: 20,
+                color: c.textPrimary,
+              ),
               title: Text('新建文件', style: TextStyle(color: c.textPrimary)),
               onTap: () {
                 Navigator.pop(ctx);
@@ -491,7 +501,11 @@ class _FileBrowserPageState extends State<FileBrowserPage> {
               ),
               IconButton(
                 tooltip: '刷新',
-                icon: DshIcon(DshGlyph.refresh, size: 20, color: c.textSecondary),
+                icon: DshIcon(
+                  DshGlyph.refresh,
+                  size: 20,
+                  color: c.textSecondary,
+                ),
                 constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
                 padding: const EdgeInsets.all(8),
                 onPressed: () => _load(_path),
@@ -569,9 +583,7 @@ class _FileBrowserPageState extends State<FileBrowserPage> {
   }
 
   Widget _row(DshColors c, FsEntry e) {
-    final icon = e.isDir
-        ? DshGlyph.folder
-        : _iconForExt(e.ext);
+    final icon = e.isDir ? DshGlyph.folder : _iconForExt(e.ext);
     return Padding(
       padding: const EdgeInsets.only(bottom: 6),
       child: InkWell(
@@ -589,7 +601,11 @@ class _FileBrowserPageState extends State<FileBrowserPage> {
           ),
           child: Row(
             children: [
-              DshIcon(icon, size: 20, color: e.isDir ? c.accent : c.textSecondary),
+              DshIcon(
+                icon,
+                size: 20,
+                color: e.isDir ? c.accent : c.textSecondary,
+              ),
               const SizedBox(width: 10),
               Expanded(
                 child: Column(
@@ -686,7 +702,11 @@ class _FileBrowserPageState extends State<FileBrowserPage> {
             if (!e.isDir) ...[
               ListTile(
                 titleAlignment: ListTileTitleAlignment.center,
-                leading: DshIcon(DshGlyph.cloud, size: 20, color: c.textPrimary),
+                leading: DshIcon(
+                  DshGlyph.cloud,
+                  size: 20,
+                  color: c.textPrimary,
+                ),
                 title: Text('下载到本地', style: TextStyle(color: c.textPrimary)),
                 subtitle: Text(
                   '存到手机 Download 目录',
@@ -699,7 +719,11 @@ class _FileBrowserPageState extends State<FileBrowserPage> {
               ),
               ListTile(
                 titleAlignment: ListTileTitleAlignment.center,
-                leading: DshIcon(DshGlyph.link, size: 20, color: c.textSecondary),
+                leading: DshIcon(
+                  DshGlyph.link,
+                  size: 20,
+                  color: c.textSecondary,
+                ),
                 title: Text('复制下载链接', style: TextStyle(color: c.textSecondary)),
                 subtitle: Text(
                   '票据 60 秒一次性有效',
@@ -853,6 +877,3 @@ class _PreviewDialogState extends State<_PreviewDialog> {
     );
   }
 }
-
-
-

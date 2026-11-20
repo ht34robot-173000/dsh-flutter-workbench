@@ -27,7 +27,10 @@ import 'package:flutter/material.dart';
 
 import '../data/chat_data.dart';
 import '../data/ds_api.dart';
+import '../data/fs_api.dart';
 import '../data/live.dart';
+import '../data/path_scan.dart';
+import 'file_browser_page.dart';
 import 'icons.dart';
 import 'markdown_view.dart';
 import 'question_panel.dart';
@@ -35,6 +38,10 @@ import 'theme.dart';
 
 class ChatPage extends StatefulWidget {
   final DshApi api;
+
+  /// 文件接口。对话正文里的路径要能直接甩进资源管理器，所以这里也拿一份。
+  final FsApi fs;
+
   final LiveClient live;
   final String sessionId;
   final String title;
@@ -43,6 +50,7 @@ class ChatPage extends StatefulWidget {
   const ChatPage({
     super.key,
     required this.api,
+    required this.fs,
     required this.live,
     required this.sessionId,
     required this.title,
@@ -136,7 +144,9 @@ class _ChatPageState extends State<ChatPage> {
       });
       return;
     }
-    final page = HistoryPage.fromJson(r.value?['value'] as Map<String, dynamic>?);
+    final page = HistoryPage.fromJson(
+      r.value?['value'] as Map<String, dynamic>?,
+    );
     setState(() {
       _loading = false;
       _error = null;
@@ -173,7 +183,9 @@ class _ChatPageState extends State<ChatPage> {
       'beforeSeq': _beforeSeq,
     });
     if (!mounted || !r.ok) return;
-    final page = HistoryPage.fromJson(r.value?['value'] as Map<String, dynamic>?);
+    final page = HistoryPage.fromJson(
+      r.value?['value'] as Map<String, dynamic>?,
+    );
     setState(() {
       final existing = _messages.map((m) => m.seq).toSet();
       final older = page.messages.where((m) => !existing.contains(m.seq));
@@ -200,10 +212,10 @@ class _ChatPageState extends State<ChatPage> {
           setState(() => _running = running);
           // 一轮结束时提问可能刚被 settle 或刚转成可补答 —— 顺手让面板对一次账
           if (!running) _bumpQuestions();
-          // 注意：**不要**在这里 clear _streamBuf。
-          // 宿主把 status:false 发得比 assistant/message 早一点点，
-          // 先清就会把已经流出来的字擦掉，然后正式消息又还没到 ——
-          // 界面上会闪一下空白。清理统一在 assistant/message 到达时做。
+        // 注意：**不要**在这里 clear _streamBuf。
+        // 宿主把 status:false 发得比 assistant/message 早一点点，
+        // 先清就会把已经流出来的字擦掉，然后正式消息又还没到 ——
+        // 界面上会闪一下空白。清理统一在 assistant/message 到达时做。
         case LiveEvent(:final sessionId, :final event):
           if (sessionId != widget.sessionId) return;
           final type = (event['type'] ?? '').toString();
@@ -349,12 +361,9 @@ class _ChatPageState extends State<ChatPage> {
       final maxSeq = _messages.isEmpty
           ? 0.0
           : _messages.map((m) => m.seq).reduce((a, b) => a > b ? a : b);
-      _messages.add(ChatMessage(
-        seq: maxSeq + 0.5,
-        role: 'user',
-        text: text,
-        local: true,
-      ));
+      _messages.add(
+        ChatMessage(seq: maxSeq + 0.5, role: 'user', text: text, local: true),
+      );
       _stickToBottom = true;
       _running = true;
     });
@@ -515,7 +524,8 @@ class _ChatPageState extends State<ChatPage> {
     // 流式内容作为一个额外的尾部气泡
     final streamText = _streamBuf.toString();
     final showStream = streamText.isNotEmpty;
-    final itemCount = _messages.length + (showStream ? 1 : 0) + (_hasMore ? 1 : 0);
+    final itemCount =
+        _messages.length + (showStream ? 1 : 0) + (_hasMore ? 1 : 0);
 
     if (itemCount == 0) {
       return Center(
@@ -526,40 +536,52 @@ class _ChatPageState extends State<ChatPage> {
       );
     }
 
-    return ListView.builder(
-      controller: _scroll,
-      padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
-      itemCount: itemCount,
-      itemBuilder: (context, i) {
-        var idx = i;
-        if (_hasMore) {
-          if (idx == 0) {
-            return Center(
-              child: TextButton(
-                onPressed: _loadEarlier,
-                child: Text(
-                  '加载更早',
-                  style: TextStyle(fontSize: 12, color: c.accent),
+    /*
+     * 整块包 `SelectionArea`：让**所有**气泡里的文字都能长按选中、复制。
+     *
+     * 之前是纯 Text，长按只有光标 / 什么都没有 —— 手机上看见一段报错想复制都做不到。
+     * 包在列表这一层而不是每个气泡各包一个，好处是**可以跨气泡连续选**
+     * （比如把「命令 + 输出」一起复制），坏处是列表滚动回收后选择会掉，
+     * 这个代价可以接受。
+     *
+     * 注意：SelectionArea 用的是长按选中，点击手势照常穿透（路径小卡片还能点）。
+     */
+    return SelectionArea(
+      child: ListView.builder(
+        controller: _scroll,
+        padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+        itemCount: itemCount,
+        itemBuilder: (context, i) {
+          var idx = i;
+          if (_hasMore) {
+            if (idx == 0) {
+              return Center(
+                child: TextButton(
+                  onPressed: _loadEarlier,
+                  child: Text(
+                    '加载更早',
+                    style: TextStyle(fontSize: 12, color: c.accent),
+                  ),
                 ),
-              ),
-            );
+              );
+            }
+            idx -= 1;
           }
-          idx -= 1;
-        }
-        if (idx < _messages.length) {
-          return _bubble(c, _messages[idx]);
-        }
-        // 最后一个：流式气泡
-        return _bubble(
-          c,
-          ChatMessage(
-            seq: double.infinity,
-            role: 'assistant',
-            text: streamText,
-            streaming: true,
-          ),
-        );
-      },
+          if (idx < _messages.length) {
+            return _bubble(c, _messages[idx]);
+          }
+          // 最后一个：流式气泡
+          return _bubble(
+            c,
+            ChatMessage(
+              seq: double.infinity,
+              role: 'assistant',
+              text: streamText,
+              streaming: true,
+            ),
+          );
+        },
+      ),
     );
   }
 
@@ -576,8 +598,9 @@ class _ChatPageState extends State<ChatPage> {
     return Padding(
       padding: const EdgeInsets.only(bottom: 10),
       child: Row(
-        mainAxisAlignment:
-            isUser ? MainAxisAlignment.end : MainAxisAlignment.start,
+        mainAxisAlignment: isUser
+            ? MainAxisAlignment.end
+            : MainAxisAlignment.start,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Flexible(
@@ -600,11 +623,11 @@ class _ChatPageState extends State<ChatPage> {
                  */
                 color: isUser
                     ? (widget.dark
-                        ? const Color(0x3D60A5FA)
-                        : const Color(0x26005FB8))
+                          ? const Color(0x3D60A5FA)
+                          : const Color(0x26005FB8))
                     : (widget.dark
-                        ? const Color(0xFF161616)
-                        : const Color(0xFFFFFFFF)),
+                          ? const Color(0xFF161616)
+                          : const Color(0xFFFFFFFF)),
                 borderRadius: BorderRadius.only(
                   topLeft: const Radius.circular(10),
                   topRight: const Radius.circular(10),
@@ -642,6 +665,10 @@ class _ChatPageState extends State<ChatPage> {
                     )
                   else
                     DshMarkdown(m.text, c: c, bubble: true),
+
+                  // 正文里出现过的真实路径 → 一行可点的入口，点了直接开资源管理器
+                  _pathChips(c, m),
+
                   if (m.streaming) ...[
                     const SizedBox(height: 6),
                     Row(
@@ -675,8 +702,134 @@ class _ChatPageState extends State<ChatPage> {
     );
   }
 
+  /* ---------------- 正文里的路径 ---------------- */
+
+  /// 把正文里认出来的绝对路径做成一行可点的小卡片。
+  ///
+  /// 为什么要单独一行，而不是直接把正文里的路径文字变成链接：
+  /// 路径十有八九写在**行内代码或代码块**里（`` `F:\a\b.md` ``），
+  /// 而 Markdown 的代码片段不能改成链接 —— 强行改写 Markdown 源码会破坏代码块。
+  /// 所以正文保持原样，下面补一行「相关路径」，点一下就用资源管理器打开。
+  Widget _pathChips(DshColors c, ChatMessage m) {
+    if (m.streaming) return const SizedBox.shrink(); // 边生成边跳没意义
+    final paths = scanPaths(m.text);
+    if (paths.isEmpty) return const SizedBox.shrink();
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 7),
+      child: Wrap(
+        spacing: 6,
+        runSpacing: 6,
+        children: [
+          for (final p in paths)
+            Material(
+              color: Colors.transparent,
+              child: InkWell(
+                borderRadius: BorderRadius.circular(7),
+                onTap: () => _openPath(p),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 5,
+                  ),
+                  decoration: BoxDecoration(
+                    color: c.accent.withValues(alpha: 0.10),
+                    borderRadius: BorderRadius.circular(7),
+                    border: Border.all(color: c.accent.withValues(alpha: 0.45)),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      DshIcon(
+                        p.looksLikeFile ? DshGlyph.fileText : DshGlyph.folder,
+                        size: 12,
+                        color: c.accent,
+                      ),
+                      const SizedBox(width: 5),
+                      ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: 210),
+                        child: Text(
+                          _shortPath(p.path),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(fontSize: 11.5, color: c.accent),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  /// 只显示末尾两段，路径太长会挤爆气泡；完整路径在打开后的标题栏里能看全。
+  ///
+  /// 为什么是两段而不是一段：只留文件名的话 `F:\a\index.js` 和 `F:\b\index.js`
+  /// 会长得一模一样（实测第一版就撞了 —— `.dsh` 和 `app` 完全看不出是哪儿）。
+  static String _shortPath(String path) {
+    final t = path.endsWith(r'\') && path.length > 3
+        ? path.substring(0, path.length - 1)
+        : path;
+    final parts = t.split(r'\');
+    if (parts.length <= 3) return t; // `F:\a` 这种本来就短，原样显示
+    return parts.sublist(parts.length - 2).join(r'\');
+  }
+
+  /// 用**远控的资源管理器**打开这个路径。
+  ///
+  /// 宿主没有「这是什么类型」的接口，所以按「先当目录、失败再当文件」试：
+  /// `fs.list` 对文件会返回 ENOTDIR 类的错误，那时就打开它所在的目录。
+  /// 两条都失败才报错 —— 报错里带宿主的原话，免得只看到「打不开」。
+  Future<void> _openPath(FoundPath p) async {
+    final (r, listing) = await widget.fs.list(p.path);
+    if (!mounted) return;
+    if (r.ok && listing != null) {
+      _pushBrowser(p.path);
+      return;
+    }
+
+    final parent = parentDirPath(p.path);
+    final (r2, l2) = await widget.fs.list(parent);
+    if (!mounted) return;
+    if (r2.ok && l2 != null) {
+      _toast('已打开所在目录：$parent');
+      _pushBrowser(parent);
+      return;
+    }
+
+    _toast('打不开 ${p.path} —— ${r.friendlyError}');
+  }
+
+  void _pushBrowser(String path) {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => FileBrowserPage(
+          fs: widget.fs,
+          dark: widget.dark,
+          initialPath: path,
+        ),
+      ),
+    );
+  }
+
+  void _toast(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..clearSnackBars()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(msg, maxLines: 2, overflow: TextOverflow.ellipsis),
+          duration: const Duration(seconds: 3),
+        ),
+      );
+  }
+
   /// 「已回答提问」回执：默认收起的一行卡片。
   ///
+
   /// 为什么必须单独做：宿主把答复 steer 回来的那条 user/message，
   /// 正文是
   ///   {"kind":"answer_to_pending_question","tool":"ask_user_question",
@@ -719,8 +872,10 @@ class _ChatPageState extends State<ChatPage> {
                     }
                   }),
                   child: Padding(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 11, vertical: 9),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 11,
+                      vertical: 9,
+                    ),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       mainAxisSize: MainAxisSize.min,
@@ -749,9 +904,7 @@ class _ChatPageState extends State<ChatPage> {
                             ],
                             const SizedBox(width: 6),
                             Icon(
-                              expanded
-                                  ? Icons.expand_less
-                                  : Icons.expand_more,
+                              expanded ? Icons.expand_less : Icons.expand_more,
                               size: 16,
                               color: c.textTertiary,
                             ),
@@ -872,8 +1025,10 @@ class _ChatPageState extends State<ChatPage> {
                     }
                   }),
                   child: Padding(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 7,
+                    ),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       mainAxisSize: MainAxisSize.min,
@@ -907,9 +1062,7 @@ class _ChatPageState extends State<ChatPage> {
                               ),
                             ),
                             Icon(
-                              expanded
-                                  ? Icons.expand_less
-                                  : Icons.expand_more,
+                              expanded ? Icons.expand_less : Icons.expand_more,
                               size: 15,
                               color: c.textTertiary,
                             ),
@@ -1005,8 +1158,10 @@ class _ChatPageState extends State<ChatPage> {
                 filled: true,
                 fillColor: c.inputFill,
                 isDense: true,
-                contentPadding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 10,
+                ),
                 border: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(10),
                   borderSide: BorderSide(color: c.stroke),
@@ -1049,7 +1204,3 @@ class _ChatPageState extends State<ChatPage> {
     );
   }
 }
-
-
-
-

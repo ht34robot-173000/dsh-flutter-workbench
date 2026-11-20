@@ -351,6 +351,7 @@ class _HomePageState extends State<HomePage> {
       MaterialPageRoute(
         builder: (_) => ChatPage(
           api: state.api,
+          fs: state.fsApi,
           live: _ensureLive(state),
           sessionId: s.id,
           title: s.title,
