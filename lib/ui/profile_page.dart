@@ -31,18 +31,10 @@ class ProfilePage extends StatefulWidget {
   final DshApi api;
   final bool dark;
 
-  /// 快捷入口的回调由 main 提供（那几个页面都在 main 里 push，避免 import 环）。
-  final VoidCallback? onOpenFiles;
-  final VoidCallback? onOpenSettings;
-  final VoidCallback? onOpenUpdate;
-
   const ProfilePage({
     super.key,
     required this.api,
     required this.dark,
-    this.onOpenFiles,
-    this.onOpenSettings,
-    this.onOpenUpdate,
   });
 
   @override
@@ -371,31 +363,16 @@ class _ProfilePageState extends State<ProfilePage> {
     );
   }
 
-  /* ---------------- 快捷入口 ---------------- */
+  /* ---------------- 账户动作 ---------------- */
 
+  /// 只有**账户相关**的动作留在这里。
+  ///
+  /// 为什么去掉「文件管理 / 连接设置 / 检查更新」：那三个在别处都已经有唯一入口了
+  /// （☰ 抽屉里是文件管理 / 检查更新，标题栏 ⚙ 是连接设置），
+  /// 在这儿再放一遍就是三处重复 —— 用户原话「很多按键都冗余了」。
+  /// 一个功能只留一个入口，「我的」只放账号/钱/关于。
   Widget _actionsCard(DshColors c, AccountOverview d) {
     final rows = <Widget>[
-      _row(
-        c,
-        glyph: DshGlyph.folder,
-        title: '文件管理',
-        subtitle: '浏览、预览、上传、下载宿主文件',
-        onTap: widget.onOpenFiles,
-      ),
-      _row(
-        c,
-        glyph: DshGlyph.link,
-        title: '连接设置',
-        subtitle: '服务器地址、网络模式、配对',
-        onTap: widget.onOpenSettings,
-      ),
-      _row(
-        c,
-        glyph: DshGlyph.sync,
-        title: '检查更新',
-        subtitle: '从 GitHub Releases 拉新版本',
-        onTap: widget.onOpenUpdate,
-      ),
       if (d.usageUrl != null)
         _row(
           c,
@@ -413,6 +390,8 @@ class _ProfilePageState extends State<ProfilePage> {
           onTap: () => _open('充值链接', d.topUpUrl!),
         ),
     ];
+
+    if (rows.isEmpty) return const SizedBox.shrink();
 
     return FluentCard(
       padding: const EdgeInsets.symmetric(vertical: 4),

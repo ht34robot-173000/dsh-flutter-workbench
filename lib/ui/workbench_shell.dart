@@ -22,13 +22,20 @@ import 'package:flutter/material.dart';
 import 'icons.dart';
 import 'theme.dart';
 
-/// 一屏的外壳：Mica 背景 + 标题栏 + 内容 + 底部两格。
-class WorkbenchShell extends StatelessWidget {
+/// 一屏的外壳：Mica 背景 + 标题栏 + 内容 + 底部两格 + **左侧抽屉**。
+///
+/// 抽屉走 `Scaffold.drawer`（从左侧滑出、可左划关闭、跟手），
+/// 不再用 `showModalBottomSheet` —— 那是「底部弹层」的语义，
+/// 点左上角 ☰ 却从底部弹出来，和 Android 上所有 App 的习惯相反
+/// （用户原话：「点击侧边栏为什么弹出来的是底部抽屉」）。
+class WorkbenchShell extends StatefulWidget {
   final bool dark;
   final Widget body;
   final int currentTab;
   final ValueChanged<int> onTab;
-  final VoidCallback onMenu;
+
+  /// 抽屉内容。null 时不挂抽屉（标题栏的 ☰ 也就没得点）。
+  final Widget? drawer;
 
   /// 切主题。**回调会带上按钮自己的屏幕坐标**（圆心），
   /// 圆形揭示就从按钮位置扩散开；拿不到坐标时给 null（退化成屏幕中心）。
@@ -42,26 +49,42 @@ class WorkbenchShell extends StatelessWidget {
     required this.body,
     required this.currentTab,
     required this.onTab,
-    required this.onMenu,
     required this.onToggleTheme,
     required this.onSettings,
+    this.drawer,
   });
 
   @override
+  State<WorkbenchShell> createState() => _WorkbenchShellState();
+}
+
+class _WorkbenchShellState extends State<WorkbenchShell> {
+  /// 用 key 打开抽屉：标题栏按钮在 Scaffold **外面**的上下文里，
+  /// `Scaffold.of(context)` 拿不到（会抛「no Scaffold ancestor」）。
+  final _scaffoldKey = GlobalKey<ScaffoldState>();
+
+  void _openDrawer() {
+    final s = _scaffoldKey.currentState;
+    if (s != null && s.hasDrawer) s.openDrawer();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final c = DshColors.of(dark);
+    final c = DshColors.of(widget.dark);
     return Scaffold(
+      key: _scaffoldKey,
+      drawer: widget.drawer,
       // 透明：让下面的 Mica 背景透上来。
       // 给 backgroundColor 会让它盖住 Mica，背景就变成一片纯色。
       backgroundColor: Colors.transparent,
       body: SizedBox.expand(
         child: MicaBackdrop(
-          dark: dark,
+          dark: widget.dark,
           child: SafeArea(
             child: Column(
               children: [
                 _titleBar(c),
-                Expanded(child: body),
+                Expanded(child: widget.body),
                 _tabBar(c),
               ],
             ),
@@ -76,7 +99,7 @@ class WorkbenchShell extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
       child: Row(
         children: [
-          _iconButton(DshGlyph.menu, c.textPrimary, onMenu),
+          _iconButton(DshGlyph.menu, c.textPrimary, _openDrawer),
           Expanded(
             child: Padding(
               padding: const EdgeInsets.only(left: 8),
@@ -93,9 +116,9 @@ class WorkbenchShell extends StatelessWidget {
           _ThemeToggleButton(
             glyph: DshGlyph.contrast,
             color: c.textPrimary,
-            onTap: onToggleTheme,
+            onTap: widget.onToggleTheme,
           ),
-          _iconButton(DshGlyph.settings, c.textPrimary, onSettings),
+          _iconButton(DshGlyph.settings, c.textPrimary, widget.onSettings),
         ],
       ),
     );
@@ -128,8 +151,8 @@ class WorkbenchShell extends StatelessWidget {
                 c,
                 tabs[i].$1,
                 tabs[i].$2,
-                active: i == currentTab,
-                onTap: () => onTab(i),
+                active: i == widget.currentTab,
+                onTap: () => widget.onTab(i),
               ),
             ),
         ],
@@ -153,7 +176,7 @@ class WorkbenchShell extends StatelessWidget {
         decoration: BoxDecoration(
           // 选中格给一层极淡底色，让「当前在哪一页」一眼可见
           color: active
-              ? (dark ? const Color(0x33FFFFFF) : const Color(0x14000000))
+              ? (widget.dark ? const Color(0x33FFFFFF) : const Color(0x14000000))
               : null,
           borderRadius: BorderRadius.circular(8),
         ),

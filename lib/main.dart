@@ -21,6 +21,7 @@ import 'ui/update_page.dart';
 import 'ui/icons.dart';
 import 'data/session_data.dart';
 import 'data/session_store.dart';
+import 'data/system_api.dart';
 import 'ui/session_list_page.dart';
 import 'ui/theme.dart';
 import 'ui/theme_reveal.dart';
@@ -296,7 +297,7 @@ class _HomePageState extends State<HomePage> {
       dark: dark,
       currentTab: _tab,
       onTab: (i) => setState(() => _tab = i),
-      onMenu: () => _openSidebar(context),
+      drawer: _buildDrawer(context, state, dark),
       onToggleTheme: (origin) => state.toggleTheme(origin: origin),
       onSettings: () => Navigator.of(context).push(
         MaterialPageRoute(builder: (_) => const SettingsPage()),
@@ -322,31 +323,7 @@ class _HomePageState extends State<HomePage> {
                   onOpenSession: (s) => _openChat(context, state, s, dark),
                 )
               : _NotReady(dark: dark),
-          ProfilePage(
-            api: state.api,
-            dark: dark,
-            onOpenFiles: () => Navigator.of(context).push(
-              MaterialPageRoute(
-                builder: (_) => FileBrowserPage(fs: state.fsApi, dark: dark),
-              ),
-            ),
-            onOpenSettings: () => Navigator.of(context).push(
-              MaterialPageRoute(builder: (_) => const SettingsPage()),
-            ),
-            onOpenUpdate: () => Navigator.of(context).push(
-              MaterialPageRoute(
-                builder: (_) => UpdatePage(
-                  dark: dark,
-                  repo: state.prefs.updateRepo,
-                  apiBase: state.prefs.updateApi,
-                  onSaveConfig: (repo, api) async {
-                    await state.prefs.setUpdateRepo(repo);
-                    await state.prefs.setUpdateApi(api);
-                  },
-                ),
-              ),
-            ),
-          ),
+          ProfilePage(api: state.api, dark: dark),
         ],
       ),
     );
@@ -388,91 +365,258 @@ class _HomePageState extends State<HomePage> {
     unawaited(SessionStore.instance.load(state.api, force: true));
   }
 
-  void _openSidebar(BuildContext context) {
-    final dark = Theme.of(context).brightness == Brightness.dark;
-    final c = DshColors.of(dark);
-    final state = AppScope.of(context);
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: c.sheetFill,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(14)),
+  /// 左侧抽屉的内容。
+  ///
+  /// 和改之前的区别：原来是 `showModalBottomSheet`（底部弹层），
+  /// 点左上角 ☰ 却从屏幕底下弹出来 —— 语义和所有 Android App 的习惯相反。
+  /// 现在交给 `Scaffold.drawer`，从左滑出、可左划关闭、跟手。
+  Widget _buildDrawer(BuildContext context, AppState state, bool dark) {
+    return _HomeDrawer(
+      api: state.api,
+      fs: state.fsApi,
+      prefs: state.prefs,
+      dark: dark,
+      onOpenFiles: () => Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => FileBrowserPage(fs: state.fsApi, dark: dark),
+        ),
       ),
-      builder: (_) => SafeArea(
+      onOpenUpdate: () => Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => UpdatePage(
+            dark: dark,
+            repo: state.prefs.updateRepo,
+            apiBase: state.prefs.updateApi,
+            onSaveConfig: (repo, api) async {
+              await state.prefs.setUpdateRepo(repo);
+              await state.prefs.setUpdateApi(api);
+            },
+          ),
+        ),
+      ),
+      onRestarted: () {
+        // 重启后宿主会断一轮：清掉缓存，等十几秒再探一次连接
+        SessionStore.instance.reset();
+        Future<void>.delayed(const Duration(seconds: 12), state.checkConnection);
+      },
+    );
+  }
+}
+
+/// 左侧抽屉：导航 + 远程重启。
+class _HomeDrawer extends StatefulWidget {
+  final DshApi api;
+  final FsApi fs;
+  final Prefs prefs;
+  final bool dark;
+  final VoidCallback onOpenFiles;
+  final VoidCallback onOpenUpdate;
+  final VoidCallback onRestarted;
+
+  const _HomeDrawer({
+    required this.api,
+    required this.fs,
+    required this.prefs,
+    required this.dark,
+    required this.onOpenFiles,
+    required this.onOpenUpdate,
+    required this.onRestarted,
+  });
+
+  @override
+  State<_HomeDrawer> createState() => _HomeDrawerState();
+}
+
+class _HomeDrawerState extends State<_HomeDrawer> {
+  late final SystemApi _sys = SystemApi(widget.api);
+  RestartStatus? _status;
+  bool _restarting = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadStatus();
+  }
+
+  Future<void> _loadStatus() async {
+    final (_, s) = await _sys.restartStatus();
+    if (!mounted) return;
+    setState(() => _status = s);
+  }
+
+  void _close() => Navigator.of(context).maybePop();
+
+  String _uptime() {
+    final ms = _status?.hostUptimeMs;
+    if (ms == null) return '';
+    final d = Duration(milliseconds: ms);
+    if (d.inHours >= 1) return '已运行 ${d.inHours} 小时 ${d.inMinutes % 60} 分';
+    if (d.inMinutes >= 1) return '已运行 ${d.inMinutes} 分钟';
+    return '刚启动';
+  }
+
+  Future<void> _confirmRestart() async {
+    final c = DshColors.of(widget.dark);
+    final ok = await showDialog<bool>(
+      context: context,
+      barrierColor: Colors.black38,
+      builder: (ctx) => Dialog(
+        backgroundColor: c.sheetFill,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(18, 16, 18, 12),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                '重启 DSH？',
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                  color: c.textPrimary,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                '会用 dsh-seamless-restart 的 relaunch.ps1 彻底重启桌面端。'
+                '那 5-15 秒桌面会显示磨砂遮罩，手机这边要等十几秒才能重连。',
+                style: TextStyle(fontSize: 12.5, height: 1.4, color: c.textSecondary),
+              ),
+              const SizedBox(height: 14),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(ctx, false),
+                    child: Text('取消', style: TextStyle(color: c.textSecondary)),
+                  ),
+                  const SizedBox(width: 8),
+                  FilledButton(
+                    onPressed: () => Navigator.pop(ctx, true),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: c.accent,
+                      foregroundColor: c.onAccent,
+                    ),
+                    child: const Text('重启'),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (ok != true || !mounted) return;
+
+    setState(() => _restarting = true);
+    final r = await _sys.restart();
+    if (!mounted) return;
+    setState(() => _restarting = false);
+
+    if (!r.ok) {
+      ScaffoldMessenger.of(context)
+        ..clearSnackBars()
+        ..showSnackBar(SnackBar(content: Text('重启失败：${r.friendlyError}')));
+      return;
+    }
+    _close();
+    widget.onRestarted();
+    ScaffoldMessenger.of(context)
+      ..clearSnackBars()
+      ..showSnackBar(const SnackBar(
+        content: Text('已请求重启，约 10-20 秒后自动重连'),
+        duration: Duration(seconds: 4),
+      ));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = DshColors.of(widget.dark);
+    final canRestart = _status?.canRestart ?? false;
+
+    return Drawer(
+      backgroundColor: c.sheetFill,
+      child: SafeArea(
         child: Column(
-          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            /*
-             * ⚠️ 每个 ListTile 都要显式 `titleAlignment: ListTileTitleAlignment.center`。
-             *
-             * 默认值是 `threeLine`/`top` 那一套：有 subtitle 时，
-             * leading 图标会被顶到整行的**顶部**，而文字块（title+subtitle）
-             * 整体比图标高 —— 视觉上就是「图标和文字没对齐，图标偏上」。
-             *
-             * 截图验证过：`文件管理` 那行的文件夹图标比文字高半行。
-             */
-            ListTile(
-              titleAlignment: ListTileTitleAlignment.center,
-              leading: DshIcon(DshGlyph.folder, size: 20, color: c.textPrimary),
-              title: Text('文件管理', style: TextStyle(color: c.textPrimary)),
-              subtitle: Text(
-                '浏览、预览、上传、下载宿主文件',
-                style: TextStyle(color: c.textTertiary, fontSize: 11.5),
-              ),
-              onTap: () {
-                Navigator.pop(context);
-                Navigator.of(context).push(
-                  MaterialPageRoute(
-                    builder: (_) => FileBrowserPage(
-                      fs: state.fsApi,
-                      dark: dark,
+            // 品牌头
+            Padding(
+              padding: const EdgeInsets.fromLTRB(18, 18, 18, 10),
+              child: Row(
+                children: [
+                  DshIcon(DshGlyph.chat, size: 20, color: c.accent),
+                  const SizedBox(width: 8),
+                  Text(
+                    'DSH 工作台',
+                    style: TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.bold,
+                      color: c.textPrimary,
                     ),
                   ),
-                );
-              },
-            ),
-            ListTile(
-              titleAlignment: ListTileTitleAlignment.center,
-              leading: DshIcon(DshGlyph.settings, size: 20, color: c.textPrimary),
-              title: Text('连接设置', style: TextStyle(color: c.textPrimary)),
-              onTap: () {
-                Navigator.pop(context);
-                Navigator.of(context).push(
-                  MaterialPageRoute(builder: (_) => const SettingsPage()),
-                );
-              },
-            ),
-            ListTile(
-              titleAlignment: ListTileTitleAlignment.center,
-              leading: DshIcon(DshGlyph.sync, size: 20, color: c.textPrimary),
-              title: Text('检查更新', style: TextStyle(color: c.textPrimary)),
-              subtitle: Text(
-                '从 GitHub Releases 拉新版本',
-                style: TextStyle(color: c.textTertiary, fontSize: 11.5),
+                ],
               ),
+            ),
+            Divider(color: c.stroke, height: 1),
+            _item(
+              c,
+              glyph: DshGlyph.folder,
+              title: '文件管理',
+              subtitle: '浏览、预览、上传、下载宿主文件',
               onTap: () {
-                Navigator.pop(context);
-                Navigator.of(context).push(
-                  MaterialPageRoute(
-                    builder: (_) => UpdatePage(
-                      dark: dark,
-                      repo: state.prefs.updateRepo,
-                      apiBase: state.prefs.updateApi,
-                      onSaveConfig: (repo, api) async {
-                        await state.prefs.setUpdateRepo(repo);
-                        await state.prefs.setUpdateApi(api);
-                      },
-                    ),
-                  ),
-                );
+                _close();
+                widget.onOpenFiles();
               },
             ),
-            ListTile(
-              titleAlignment: ListTileTitleAlignment.center,
-              leading: DshIcon(DshGlyph.info, size: 20, color: c.textTertiary),
-              title: Text(
-                '轨迹将在后续阶段接入',
-                style: TextStyle(color: c.textTertiary, fontSize: 12.5),
+            _item(
+              c,
+              glyph: DshGlyph.sync,
+              title: '检查更新',
+              subtitle: '从 GitHub Releases 拉新版本',
+              onTap: () {
+                _close();
+                widget.onOpenUpdate();
+              },
+            ),
+            Divider(color: c.stroke, height: 1),
+            _item(
+              c,
+              glyph: DshGlyph.bolt,
+              title: _restarting ? '正在重启…' : '重启 DSH',
+              subtitle: _status == null
+                  ? '正在读取重启状态…'
+                  : (canRestart
+                      ? '远程重启桌面端 · ${_uptime()}'
+                      : _status!.reasonText),
+              onTap: canRestart && !_restarting ? _confirmRestart : null,
+              trailing: _restarting
+                  ? SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(strokeWidth: 1.6, color: c.accent),
+                    )
+                  : null,
+            ),
+            const Spacer(),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(18, 8, 18, 14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    widget.prefs.baseUrl.isEmpty ? '未配置地址' : widget.prefs.baseUrl,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(fontSize: 10.5, color: c.textTertiary),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    '长按消息可选中复制 · 路径可点开资源管理器',
+                    style: TextStyle(fontSize: 10, color: c.textTertiary),
+                  ),
+                ],
               ),
             ),
           ],
@@ -480,8 +624,51 @@ class _HomePageState extends State<HomePage> {
       ),
     );
   }
-}
 
+  Widget _item(
+    DshColors c, {
+    required DshGlyph glyph,
+    required String title,
+    required String subtitle,
+    VoidCallback? onTap,
+    Widget? trailing,
+  }) {
+    final enabled = onTap != null;
+    final fg = enabled ? c.textPrimary : c.textTertiary;
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(18, 12, 14, 12),
+          child: Row(
+            children: [
+              DshIcon(glyph, size: 19, color: fg),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(title, style: TextStyle(fontSize: 13.5, color: fg)),
+                    const SizedBox(height: 2),
+                    Text(
+                      subtitle,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(fontSize: 11, color: c.textTertiary),
+                    ),
+                  ],
+                ),
+              ),
+              if (trailing != null) trailing,
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
 /// 还没配对时的引导页。
 class _NotReady extends StatelessWidget {
   final bool dark;

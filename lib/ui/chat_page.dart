@@ -77,6 +77,10 @@ class _ChatPageState extends State<ChatPage> {
   bool _running = false;
   bool _sending = false;
 
+  /// 还没被 agent 取走的插话（session.steerPending）。
+  /// 插话不会立刻进对话，靠这条提示「已经塞进去了，还在排队」。
+  List<Map<String, dynamic>> _pendingSteers = const [];
+
   /// 是否贴着底部。用户往上翻时不要把他拽回来。
   bool _stickToBottom = true;
 
@@ -102,6 +106,7 @@ class _ChatPageState extends State<ChatPage> {
     _scroll.addListener(_onScroll);
     _loadHistory();
     _subscribe();
+    _loadPendingSteers();
   }
 
   @override
@@ -212,6 +217,7 @@ class _ChatPageState extends State<ChatPage> {
           setState(() => _running = running);
           // 一轮结束时提问可能刚被 settle 或刚转成可补答 —— 顺手让面板对一次账
           if (!running) _bumpQuestions();
+          _loadPendingSteers();
         // 注意：**不要**在这里 clear _streamBuf。
         // 宿主把 status:false 发得比 assistant/message 早一点点，
         // 先清就会把已经流出来的字擦掉，然后正式消息又还没到 ——
@@ -295,7 +301,75 @@ class _ChatPageState extends State<ChatPage> {
     });
   }
 
-  /* ---------------- 发送 ---------------- */
+  /* ---------------- 发送 / 插话 ---------------- */
+
+  /// 插话：往**正在跑**的 agent 里塞一条消息，不打断它当前这一轮。
+  ///
+  /// 走 `session.steer`（不是 prompt）：
+  ///   - `prompt(mode: 'steer')` 也能塞，但 `steer` 这条路还会把消息放进
+  ///     `nextStep` / `nextTurn` 队列，能被 `steerPending` 列出来、被 `steerRecall` 撤回；
+  ///   - 宿主 `agent.steer()` 要的是**一条 message 对象**，插件在 lib/session.js 里拼好了，
+  ///     客户端只传 `{sessionId, text}`。
+  ///
+  /// 插话成功后**不做乐观插入**：它还没成为对话的一部分（agent 可能下一步才读），
+  /// 塞进气泡列表反而会让人以为「已经发过去了」。用底部的待接收条提示。
+  Future<void> _steer() async {
+    final text = _input.text.trim();
+    if (text.isEmpty || _sending) return;
+
+    setState(() => _sending = true);
+    final r = await widget.api.api('session.steer', {
+      'sessionId': widget.sessionId,
+      'text': text,
+    });
+    if (!mounted) return;
+    setState(() => _sending = false);
+
+    if (!r.ok) {
+      // 失败要把话还回去（和发送一致，不能吞）
+      ScaffoldMessenger.of(context)
+        ..clearSnackBars()
+        ..showSnackBar(SnackBar(content: Text('插话失败：${r.friendlyError}')));
+      return;
+    }
+
+    _input.clear();
+    ScaffoldMessenger.of(context)
+      ..clearSnackBars()
+      ..showSnackBar(const SnackBar(
+        content: Text('已插话，agent 会在下一步看到'),
+        duration: Duration(seconds: 2),
+      ));
+    await _loadPendingSteers();
+  }
+
+  Future<void> _loadPendingSteers() async {
+    final r = await widget.api.api('session.steerPending', {
+      'sessionId': widget.sessionId,
+    });
+    if (!mounted) return;
+    final items = r.value?['value']?['items'];
+    setState(() {
+      _pendingSteers = (items is List)
+          ? items.whereType<Map>().map((e) => e.cast<String, dynamic>()).toList()
+          : <Map<String, dynamic>>[];
+    });
+  }
+
+  Future<void> _recallSteer(String id) async {
+    final r = await widget.api.api('session.steerRecall', {
+      'sessionId': widget.sessionId,
+      'id': id,
+    });
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..clearSnackBars()
+      ..showSnackBar(SnackBar(
+        content: Text(r.ok ? '已撤回' : '撤回失败：${r.friendlyError}'),
+        duration: const Duration(seconds: 2),
+      ));
+    await _loadPendingSteers();
+  }
 
   Future<void> _send() async {
     final text = _input.text.trim();
@@ -1143,7 +1217,12 @@ class _ChatPageState extends State<ChatPage> {
         color: c.winBg.withValues(alpha: 0.94),
         border: Border(top: BorderSide(color: c.stroke, width: 1)),
       ),
-      child: Row(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // 待接收的插话：agent 还没读到，给了个撤回的机会
+          if (_pendingSteers.isNotEmpty) _pendingSteerBar(c),
+          Row(
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
           Expanded(
@@ -1175,14 +1254,38 @@ class _ChatPageState extends State<ChatPage> {
             ),
           ),
           const SizedBox(width: 8),
+          /*
+           * 任务在跑的时候给两个动作：
+           *   插话 —— 塞进当前这轮，不等它跑完（`session.steer`）
+           *   排队 —— 等这轮结束后再发（`session.prompt` mode=queue）
+           * 空闲时只有一个「发送」，少一半按钮。
+           */
+          if (_running) ...[
+            SizedBox(
+              height: 42,
+              child: OutlinedButton(
+                onPressed: _sending ? null : _send,
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: c.textPrimary,
+                  side: BorderSide(color: c.stroke),
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                ),
+                child: const Text('排队', style: TextStyle(fontSize: 12.5)),
+              ),
+            ),
+            const SizedBox(width: 6),
+          ],
           SizedBox(
             height: 42,
             child: FilledButton(
-              onPressed: _sending ? null : _send,
+              onPressed: _sending ? null : (_running ? _steer : _send),
               style: FilledButton.styleFrom(
                 backgroundColor: c.accent,
                 foregroundColor: c.onAccent,
-                padding: const EdgeInsets.symmetric(horizontal: 18),
+                padding: const EdgeInsets.symmetric(horizontal: 16),
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(10),
                 ),
@@ -1196,10 +1299,126 @@ class _ChatPageState extends State<ChatPage> {
                         color: c.onAccent,
                       ),
                     )
-                  : const Text('发送'),
+                  : Text(_running ? '插话' : '发送'),
             ),
           ),
         ],
+      ),
+        ],
+      ),
+    );
+  }
+
+  /// 待接收插话条。
+  Widget _pendingSteerBar(DshColors c) {
+    final n = _pendingSteers.length;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Row(
+        children: [
+          DshIcon(DshGlyph.bolt, size: 13, color: c.accent),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              '已插话 $n 条，等 agent 接收',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: 11, color: c.textSecondary),
+            ),
+          ),
+          TextButton(
+            onPressed: () => _showPendingSteers(c),
+            style: TextButton.styleFrom(
+              minimumSize: const Size(0, 28),
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              foregroundColor: c.accent,
+            ),
+            child: const Text('查看', style: TextStyle(fontSize: 11.5)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showPendingSteers(DshColors c) async {
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => Dialog(
+        backgroundColor: c.sheetFill,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 420, maxHeight: 420),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '等待 agent 接收的插话',
+                  style: TextStyle(
+                    fontSize: 14.5,
+                    fontWeight: FontWeight.bold,
+                    color: c.textPrimary,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  '已经进队列、还没被取走，可以撤回；一旦被 agent 读到就撤不回了。',
+                  style: TextStyle(fontSize: 11, height: 1.4, color: c.textTertiary),
+                ),
+                const SizedBox(height: 10),
+                Flexible(
+                  child: SingleChildScrollView(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        for (final it in _pendingSteers)
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 8),
+                            child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Expanded(
+                                  child: Text(
+                                    (it['text'] ?? '').toString(),
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      height: 1.4,
+                                      color: c.textPrimary,
+                                    ),
+                                  ),
+                                ),
+                                TextButton(
+                                  onPressed: () async {
+                                    Navigator.pop(ctx);
+                                    await _recallSteer((it['id'] ?? '').toString());
+                                  },
+                                  style: TextButton.styleFrom(
+                                    minimumSize: const Size(0, 28),
+                                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                                    foregroundColor: c.danger,
+                                  ),
+                                  child: const Text('撤回', style: TextStyle(fontSize: 11.5)),
+                                ),
+                              ],
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: TextButton(
+                    onPressed: () => Navigator.pop(ctx),
+                    child: Text('关闭', style: TextStyle(color: c.textSecondary)),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }
