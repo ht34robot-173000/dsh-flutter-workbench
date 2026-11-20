@@ -55,6 +55,22 @@ class AppState extends ChangeNotifier {
 
   bool ready = false;
 
+  /// 列表里是否显示「未分组」「已归档」两个分组（侧边栏可切，落盘在 Prefs）。
+  bool showUngrouped = true;
+  bool showArchived = false;
+
+  Future<void> setShowUngrouped(bool v) async {
+    showUngrouped = v;
+    await prefs.setShowUngrouped(v);
+    notifyListeners();
+  }
+
+  Future<void> setShowArchived(bool v) async {
+    showArchived = v;
+    await prefs.setShowArchived(v);
+    notifyListeners();
+  }
+
   /// 最近一次连接检查结果。
   String? connHint;
   bool? connOk;
@@ -64,6 +80,8 @@ class AppState extends ChangeNotifier {
     api = DshApi(prefs);
     fsApi = FsApi(prefs);
     dark = prefs.isDark;
+    showUngrouped = prefs.showUngrouped;
+    showArchived = prefs.showArchived;
     ready = true;
     notifyListeners();
     await checkConnection();
@@ -376,6 +394,10 @@ class _HomePageState extends State<HomePage> {
       fs: state.fsApi,
       prefs: state.prefs,
       dark: dark,
+      showUngrouped: state.showUngrouped,
+      showArchived: state.showArchived,
+      onToggleUngrouped: state.setShowUngrouped,
+      onToggleArchived: state.setShowArchived,
       onOpenFiles: () => Navigator.of(context).push(
         MaterialPageRoute(
           builder: (_) => FileBrowserPage(fs: state.fsApi, dark: dark),
@@ -413,6 +435,12 @@ class _HomeDrawer extends StatefulWidget {
   final VoidCallback onOpenUpdate;
   final VoidCallback onRestarted;
 
+  /// 列表显示开关（真实状态在 AppState，这里只负责显示与回调）。
+  final bool showUngrouped;
+  final bool showArchived;
+  final ValueChanged<bool> onToggleUngrouped;
+  final ValueChanged<bool> onToggleArchived;
+
   const _HomeDrawer({
     required this.api,
     required this.fs,
@@ -421,6 +449,10 @@ class _HomeDrawer extends StatefulWidget {
     required this.onOpenFiles,
     required this.onOpenUpdate,
     required this.onRestarted,
+    required this.showUngrouped,
+    required this.showArchived,
+    required this.onToggleUngrouped,
+    required this.onToggleArchived,
   });
 
   @override
@@ -581,6 +613,22 @@ class _HomeDrawerState extends State<_HomeDrawer> {
               },
             ),
             Divider(color: c.stroke, height: 1),
+            // 列表显示开关：这两个分组不必都显示，交给用户自己定（落盘在 Prefs）
+            _checkRow(
+              c,
+              title: '显示未分组',
+              subtitle: '没有归属工作区的会话',
+              value: widget.showUngrouped,
+              onChanged: widget.onToggleUngrouped,
+            ),
+            _checkRow(
+              c,
+              title: '显示已归档',
+              subtitle: '归档起来的会话（默认收起）',
+              value: widget.showArchived,
+              onChanged: widget.onToggleArchived,
+            ),
+            Divider(color: c.stroke, height: 1),
             _item(
               c,
               glyph: DshGlyph.bolt,
@@ -620,6 +668,61 @@ class _HomeDrawerState extends State<_HomeDrawer> {
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+
+  /// 一行「复选框 + 标题 + 说明」。点整行都能切换，不必精确点小方块。
+  Widget _checkRow(
+    DshColors c, {
+    required String title,
+    required String subtitle,
+    required bool value,
+    required ValueChanged<bool> onChanged,
+  }) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: () => onChanged(!value),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(14, 6, 14, 6),
+          child: Row(
+            children: [
+              SizedBox(
+                width: 24,
+                height: 24,
+                child: Checkbox(
+                  value: value,
+                  onChanged: (v) => onChanged(v ?? false),
+                  activeColor: c.accent,
+                  checkColor: c.onAccent,
+                  side: BorderSide(color: c.stroke, width: 1.4),
+                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  visualDensity: VisualDensity.compact,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      title,
+                      style: TextStyle(fontSize: 13, color: c.textPrimary),
+                    ),
+                    Text(
+                      subtitle,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(fontSize: 10.5, color: c.textTertiary),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -957,7 +1060,6 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 }
-
 
 
 

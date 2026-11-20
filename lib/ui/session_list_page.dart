@@ -18,6 +18,7 @@ library;
 import 'package:flutter/material.dart';
 
 import '../data/ds_api.dart';
+import '../main.dart' show AppScope;
 import '../data/session_data.dart';
 import '../data/session_store.dart';
 import 'icons.dart';
@@ -86,7 +87,26 @@ class _SessionListPageState extends State<SessionListPage> {
           return Center(child: CircularProgressIndicator(color: c.accent));
         }
 
-        final groups = data.grouped(const {});
+        /*
+         * 分组 = 工作区分组 + 「未分组」+ 「已归档」。
+         *
+         * 后两个各自受侧边栏的两个复选框控制（Prefs 落盘）：
+         *   「未分组」= 没有归属工作区的会话（工作区被删/临时目录跑的），默认显示
+         *   「已归档」= archived=true，默认**不显示**（归档本来就是为了收起来）
+         *
+         * 注意它们在 grouped() 之外拼进来：grouped() 只吐有工作区的 active 会话，
+         * 直接把 `archivedItems` / `ungrouped` 追加在后面，顺序稳定、不影响工作区分组。
+         */
+        final state = AppScope.of(context);
+        final groups = <SessionGroup>[
+          ...data.grouped(const {}),
+          if (state.showUngrouped && data.ungrouped.isNotEmpty)
+            SessionGroup('未分组', [...data.ungrouped]
+              ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt))),
+          if (state.showArchived && data.archivedItems.isNotEmpty)
+            SessionGroup('已归档', [...data.archivedItems]
+              ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt))),
+        ];
         if (groups.isEmpty) {
           return _ThreeState.empty(c: c, message: '还没有会话');
         }
@@ -222,11 +242,203 @@ class _SessionListPageState extends State<SessionListPage> {
     );
   }
 
+  /* ---------------- 长按动作：重命名 / 归档 ---------------- */
+
+  /// 长按会话卡弹的动作菜单。
+  ///
+  /// 为什么不放「删除」：宿主只有 `session.archive`（归档），没有删除接口 ——
+  /// 给一个点了报错的按钮比不给更糟。要真删得去电脑上删会话目录。
+  Future<void> _showSessionActions(DshColors c, SessionItem s) async {
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: c.sheetFill,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(14)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 14, 16, 6),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      s.title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.bold,
+                        color: c.textPrimary,
+                      ),
+                    ),
+                  ),
+                  Text(
+                    formatSessionTime(s.updatedAt),
+                    style: TextStyle(fontSize: 11, color: c.textTertiary),
+                  ),
+                ],
+              ),
+            ),
+            ListTile(
+              titleAlignment: ListTileTitleAlignment.center,
+              leading: DshIcon(DshGlyph.edit, size: 20, color: c.textPrimary),
+              title: Text('重命名', style: TextStyle(color: c.textPrimary)),
+              onTap: () {
+                Navigator.pop(ctx);
+                _renameSession(c, s);
+              },
+            ),
+            ListTile(
+              titleAlignment: ListTileTitleAlignment.center,
+              leading: DshIcon(
+                DshGlyph.archive,
+                size: 20,
+                color: c.textPrimary,
+              ),
+              title: Text(
+                s.archived ? '取消归档' : '归档',
+                style: TextStyle(color: c.textPrimary),
+              ),
+              subtitle: Text(
+                s.archived ? '放回列表' : '从列表收起来（可在侧边栏打开显示）',
+                style: TextStyle(color: c.textTertiary, fontSize: 11.5),
+              ),
+              onTap: () {
+                Navigator.pop(ctx);
+                _archiveSession(s, !s.archived);
+              },
+            ),
+            const SizedBox(height: 4),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 重命名。用自绘弹层（不用 AlertDialog：默认样式和 App 的卡片风格不一致）。
+  Future<void> _renameSession(DshColors c, SessionItem s) async {
+    final controller = TextEditingController(text: s.title);
+    final ok = await showDialog<bool>(
+      context: context,
+      barrierColor: Colors.black38,
+      builder: (ctx) => Dialog(
+        backgroundColor: c.sheetFill,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 10),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                '重命名会话',
+                style: TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.bold,
+                  color: c.textPrimary,
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: controller,
+                autofocus: true,
+                maxLength: 60,
+                style: TextStyle(fontSize: 13.5, color: c.textPrimary),
+                decoration: InputDecoration(
+                  isDense: true,
+                  counterStyle: TextStyle(fontSize: 10, color: c.textTertiary),
+                  filled: true,
+                  fillColor: c.inputFill,
+                  contentPadding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(10),
+                    borderSide: BorderSide(color: c.stroke),
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(10),
+                    borderSide: BorderSide(color: c.stroke),
+                  ),
+                ),
+                onSubmitted: (_) => Navigator.pop(ctx, true),
+              ),
+              const SizedBox(height: 4),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(ctx, false),
+                    child: Text('取消', style: TextStyle(color: c.textSecondary)),
+                  ),
+                  const SizedBox(width: 6),
+                  FilledButton(
+                    onPressed: () => Navigator.pop(ctx, true),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: c.accent,
+                      foregroundColor: c.onAccent,
+                    ),
+                    child: const Text('保存'),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    final title = controller.text.trim();
+    controller.dispose();
+    if (ok != true || !mounted || title.isEmpty || title == s.title) return;
+
+    final r = await widget.api.api('session.rename', {
+      'sessionId': s.id,
+      'title': title,
+    });
+    if (!mounted) return;
+    if (!r.ok) {
+      _toast('重命名失败：${r.friendlyError}');
+      return;
+    }
+    _toast('已重命名为「$title」');
+    await _load();
+  }
+
+  /// 归档 / 取消归档。
+  Future<void> _archiveSession(SessionItem s, bool archived) async {
+    final r = await widget.api.api('session.archive', {
+      'sessionId': s.id,
+      'archived': archived,
+    });
+    if (!mounted) return;
+    if (!r.ok) {
+      _toast('${archived ? '归档' : '取消归档'}失败：${r.friendlyError}');
+      return;
+    }
+    _toast(archived ? '已归档，可在侧边栏打开「显示已归档」找回' : '已取消归档');
+    await _load();
+  }
+
+  void _toast(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..clearSnackBars()
+      ..showSnackBar(SnackBar(
+        content: Text(msg, maxLines: 2, overflow: TextOverflow.ellipsis),
+        duration: const Duration(seconds: 2),
+      ));
+  }
+
   Widget _sessionCard(DshColors c, SessionItem s) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 6),
       child: InkWell(
         borderRadius: BorderRadius.circular(8),
+        // 长按：重命名 / 归档（已归档的给「取消归档」）
+        onLongPress: () => _showSessionActions(c, s),
         onTap: () {
           if (widget.onOpenSession != null) {
             widget.onOpenSession!(s);

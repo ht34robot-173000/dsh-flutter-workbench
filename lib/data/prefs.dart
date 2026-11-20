@@ -21,6 +21,8 @@ class Prefs {
   static const _kCookieLan = 'cookie_lan';
   static const _kCookieWan = 'cookie_wan';
   static const _kTheme = 'theme';
+  static const _kShowUngrouped = 'show_ungrouped';
+  static const _kShowArchived = 'show_archived';
 
   /// 老版本的键，只用于迁移（Kotlin 版 v3.0 之前只有 base_url 一个地址）
   static const _kLegacyUrl = 'base_url';
@@ -160,6 +162,24 @@ class Prefs {
 
   Future<void> setDark(bool dark) =>
       _sp.setString(_kTheme, dark ? 'dark' : 'light');
+
+  /* ---------------- 列表显示偏好 ---------------- */
+
+  /// 是否把「未分组」（没有归属工作区的会话）显示在列表里。
+  ///
+  /// 这些会话大多来自临时目录，混在工作区分组后面会让列表显得没收拾；
+  /// 但也有人就是靠它找旧会话，所以做成开关，默认**显示**。
+  bool get showUngrouped =>
+      (_sp.getString(_kShowUngrouped) ?? '1') == '1';
+
+  Future<void> setShowUngrouped(bool v) =>
+      _sp.setString(_kShowUngrouped, v ? '1' : '0');
+
+  /// 是否显示「已归档」。默认**不显示** —— 归档本来就是为了收起来。
+  bool get showArchived => (_sp.getString(_kShowArchived) ?? '0') == '1';
+
+  Future<void> setShowArchived(bool v) =>
+      _sp.setString(_kShowArchived, v ? '1' : '0');
 
   /// 规范化地址：补 scheme、去尾部斜杠。
   ///
