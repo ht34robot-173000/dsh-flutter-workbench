@@ -294,6 +294,12 @@ class ChatMessage {
 /// 历史拉取的返回。
 class HistoryPage {
   final List<ChatMessage> messages;
+
+  /// 原始事件（只留 map 形态的）。
+  ///
+  /// 消息只是其中一类：	ool/call / 	ool/result 不产出气泡，但对话里的
+  /// 「执行了命令并已写入文件」那几行要靠它们重建（见 data/chat_activity.dart）。
+  final List<Map<String, dynamic>> rawEvents;
   final bool hasMore;
   final double? beforeSeq;
   final int totalCount;
@@ -301,6 +307,7 @@ class HistoryPage {
   const HistoryPage({
     required this.messages,
     required this.hasMore,
+    this.rawEvents = const [],
     this.beforeSeq,
     this.totalCount = 0,
   });
@@ -308,10 +315,13 @@ class HistoryPage {
   factory HistoryPage.fromJson(Map<String, dynamic>? value) {
     final events = value?['events'];
     final msgs = <ChatMessage>[];
+    final raw = <Map<String, dynamic>>[];
     if (events is List) {
       for (final e in events) {
         if (e is! Map) continue;
-        final m = ChatMessage.fromEvent(e.cast<String, dynamic>());
+        final map = e.cast<String, dynamic>();
+        raw.add(map);
+        final m = ChatMessage.fromEvent(map);
         if (m != null) msgs.add(m);
       }
     }
@@ -320,6 +330,7 @@ class HistoryPage {
     final bs = value?['beforeSeq'];
     return HistoryPage(
       messages: msgs,
+      rawEvents: raw,
       hasMore: value?['hasMore'] == true,
       beforeSeq: bs is num ? bs.toDouble() : null,
       totalCount: (value?['totalCount'] is num)

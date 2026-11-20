@@ -25,6 +25,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../data/chat_activity.dart';
 import '../data/chat_data.dart';
 import '../data/ds_api.dart';
 import '../data/fs_api.dart';
@@ -32,6 +33,7 @@ import '../data/live.dart';
 import '../data/path_scan.dart';
 import 'file_browser_page.dart';
 import 'icons.dart';
+import 'activity_row.dart';
 import 'markdown_view.dart';
 import 'question_panel.dart';
 import 'theme.dart';
@@ -95,6 +97,15 @@ class _ChatPageState extends State<ChatPage> {
   /// 所以由本页在「可能出了新提问」时递增这个计数器，面板的
   /// `didUpdateWidget` 看到它变了就重新拉一次 `session.questions`。
   int _questionsTick = 0;
+
+  /// 会话里的「进行时」行：key = 	urn:step。
+  ///
+  /// 桌面端在回答中间会插 >_ 执行了命令并已写入文件 这种行；这里用同一份数据
+  /// （	ool/call + 	ool/result）按 step 聚合成一行，可展开看命令和输出。
+  final _activities = <String, ChatActivity>{};
+
+  /// 展开了的活动行（按 	urn:step）。
+  final _expandedActivities = <String>{};
 
   /// 哪些「已回答提问」回执被展开了（按 seq 记）。
   /// 默认**全部收起** —— 和桌面端一致，不铺一屏原始 JSON。
@@ -176,6 +187,15 @@ class _ChatPageState extends State<ChatPage> {
 
       _hasMore = page.hasMore;
       _beforeSeq = page.beforeSeq;
+
+      // 历史里的 tool/call + tool/result 也重建一遍（宿主没裁这两类事件，
+      // 只对 tool/result 的超长文本做了截断），这样往回翻也能看到「执行了命令」。
+      final acts = buildActivities(page.rawEvents);
+      for (final a in acts) {
+        _activities[a.key] = _activities[a.key] == null
+            ? a
+            : _mergeActivity(_activities[a.key]!, a);
+      }
     });
     _scrollToBottom(jump: true);
   }
@@ -198,6 +218,39 @@ class _ChatPageState extends State<ChatPage> {
       _hasMore = page.hasMore;
       _beforeSeq = page.beforeSeq;
     });
+  }
+
+  /* ---------------- 进行时（工具调用行） ---------------- */
+
+  /// 把一条 tool/call 或 tool/result 并进 [_activities]。
+  ///
+  /// 复用 uildActivities（单条也在里面走一遍同样的聚合逻辑），
+  /// 避免「历史一套解析、实时另一套」两边口径不一致。
+  void _applyActivityEvent(Map<String, dynamic> event) {
+    final one = buildActivities([event]);
+    if (one.isEmpty) return;
+    final a = one.first;
+    setState(() {
+      final cur = _activities[a.key];
+      _activities[a.key] = cur == null ? a : _mergeActivity(cur, a);
+    });
+  }
+
+  /// 同一 step 的两次解析结果合并：按 callId 对齐，**有结果的那份优先**。
+  ChatActivity _mergeActivity(ChatActivity base, ChatActivity next) {
+    var out = base;
+    for (final e in next.entries) {
+      final existing = out.entries.where((x) => x.callId == e.callId);
+      if (existing.isEmpty) {
+        out = out.copyWithEntry(e);
+        continue;
+      }
+      final cur = existing.first;
+      // 谁有 result/error 用谁
+      final pick = (e.done && !cur.done) ? e : cur;
+      out = out.copyWithEntry(pick);
+    }
+    return out;
   }
 
   /* ---------------- 实时流 ---------------- */
@@ -242,6 +295,11 @@ class _ChatPageState extends State<ChatPage> {
             final data = event['data'];
             final name = (data is Map) ? (data['name'] ?? '').toString() : '';
             if (name == 'ask_user_question') _bumpQuestions();
+          }
+
+          // 工具调用 / 结果 → 维护「进行时」行
+          if (type == 'tool/call' || type == 'tool/result') {
+            _applyActivityEvent(event);
           }
 
           final m = ChatMessage.fromEvent(event);
@@ -598,8 +656,24 @@ class _ChatPageState extends State<ChatPage> {
     // 流式内容作为一个额外的尾部气泡
     final streamText = _streamBuf.toString();
     final showStream = streamText.isNotEmpty;
-    final itemCount =
-        _messages.length + (showStream ? 1 : 0) + (_hasMore ? 1 : 0);
+
+    /*
+     * 消息和「进行时」行要**按 seq 混排**：桌面端就是一边回答问题
+     * 一边插 `>_ 执行了命令并已写入文件`，顺序错了会看不懂。
+     */
+    final entries = <_Entry>[
+      for (final m in _messages) _Entry(m.seq, m),
+      for (final a in _activities.values) _Entry(a.seq, a),
+    ]..sort((x, y) => x.seq.compareTo(y.seq));
+
+    final anyRunningActivity = _activities.values.any((a) => a.running);
+    // 正在跑、又没有工具在执行 → 就是在等模型（桌面端显示「正在分析请求」）
+    final showThinking = _running && !anyRunningActivity;
+
+    final itemCount = entries.length +
+        (showStream ? 1 : 0) +
+        (showThinking ? 1 : 0) +
+        (_hasMore ? 1 : 0);
 
     if (itemCount == 0) {
       return Center(
@@ -641,20 +715,61 @@ class _ChatPageState extends State<ChatPage> {
             }
             idx -= 1;
           }
-          if (idx < _messages.length) {
-            return _bubble(c, _messages[idx]);
+          if (idx < entries.length) {
+            final payload = entries[idx].payload;
+            if (payload is ChatActivity) {
+              return ActivityRow(
+                activity: payload,
+                c: c,
+                expanded: _expandedActivities.contains(payload.key),
+                onToggle: () => setState(() {
+                  if (!_expandedActivities.remove(payload.key)) {
+                    _expandedActivities.add(payload.key);
+                  }
+                }),
+              );
+            }
+            return _bubble(c, payload as ChatMessage);
           }
-          // 最后一个：流式气泡
-          return _bubble(
-            c,
-            ChatMessage(
-              seq: double.infinity,
-              role: 'assistant',
-              text: streamText,
-              streaming: true,
-            ),
-          );
+          idx -= entries.length;
+          if (showStream && idx == 0) {
+            return _bubble(
+              c,
+              ChatMessage(
+                seq: double.infinity,
+                role: 'assistant',
+                text: streamText,
+                streaming: true,
+              ),
+            );
+          }
+          if (showStream) idx -= 1;
+          // 尾部：正在等模型（桌面端的「正在分析请求」）
+          if (showThinking && idx == 0) return _thinkingRow(c);
+          return _thinkingRow(c);
         },
+      ),
+    );
+  }
+
+  /// 等模型时的尾部提示（对应桌面端的「正在分析请求」）。
+  Widget _thinkingRow(DshColors c) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10, left: 2),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          SizedBox(
+            width: 11,
+            height: 11,
+            child: CircularProgressIndicator(strokeWidth: 1.6, color: c.accent),
+          ),
+          const SizedBox(width: 6),
+          Text(
+            '正在分析请求',
+            style: TextStyle(fontSize: 11.5, color: c.textTertiary),
+          ),
+        ],
       ),
     );
   }
@@ -1422,4 +1537,11 @@ class _ChatPageState extends State<ChatPage> {
       ),
     );
   }
+}
+
+/// 列表里的一项：要么是一条消息，要么是一行「进行时」。
+class _Entry {
+  final double seq;
+  final Object payload;
+  const _Entry(this.seq, this.payload);
 }
