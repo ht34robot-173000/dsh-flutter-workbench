@@ -23,9 +23,12 @@ library;
 
 import 'dart:async';
 
+import 'dart:convert';
+
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
-import '../data/chat_activity.dart';
+import '../data/attachments.dart';
 import '../data/chat_data.dart';
 import '../data/ds_api.dart';
 import '../data/fs_api.dart';
@@ -33,7 +36,6 @@ import '../data/live.dart';
 import '../data/path_scan.dart';
 import 'file_browser_page.dart';
 import 'icons.dart';
-import 'activity_row.dart';
 import 'markdown_view.dart';
 import 'question_panel.dart';
 import 'theme.dart';
@@ -79,6 +81,11 @@ class _ChatPageState extends State<ChatPage> {
   bool _running = false;
   bool _sending = false;
 
+  /// 待发送的附件（图片 / 文件）。发送成功后清空。
+  final _pending = <PendingAttachment>[];
+
+
+
   /// 还没被 agent 取走的插话（session.steerPending）。
   /// 插话不会立刻进对话，靠这条提示「已经塞进去了，还在排队」。
   List<Map<String, dynamic>> _pendingSteers = const [];
@@ -98,14 +105,6 @@ class _ChatPageState extends State<ChatPage> {
   /// `didUpdateWidget` 看到它变了就重新拉一次 `session.questions`。
   int _questionsTick = 0;
 
-  /// 会话里的「进行时」行：key = 	urn:step。
-  ///
-  /// 桌面端在回答中间会插 >_ 执行了命令并已写入文件 这种行；这里用同一份数据
-  /// （	ool/call + 	ool/result）按 step 聚合成一行，可展开看命令和输出。
-  final _activities = <String, ChatActivity>{};
-
-  /// 展开了的活动行（按 	urn:step）。
-  final _expandedActivities = <String>{};
 
   /// 哪些「已回答提问」回执被展开了（按 seq 记）。
   /// 默认**全部收起** —— 和桌面端一致，不铺一屏原始 JSON。
@@ -188,14 +187,6 @@ class _ChatPageState extends State<ChatPage> {
       _hasMore = page.hasMore;
       _beforeSeq = page.beforeSeq;
 
-      // 历史里的 tool/call + tool/result 也重建一遍（宿主没裁这两类事件，
-      // 只对 tool/result 的超长文本做了截断），这样往回翻也能看到「执行了命令」。
-      final acts = buildActivities(page.rawEvents);
-      for (final a in acts) {
-        _activities[a.key] = _activities[a.key] == null
-            ? a
-            : _mergeActivity(_activities[a.key]!, a);
-      }
     });
     _scrollToBottom(jump: true);
   }
@@ -218,39 +209,6 @@ class _ChatPageState extends State<ChatPage> {
       _hasMore = page.hasMore;
       _beforeSeq = page.beforeSeq;
     });
-  }
-
-  /* ---------------- 进行时（工具调用行） ---------------- */
-
-  /// 把一条 tool/call 或 tool/result 并进 [_activities]。
-  ///
-  /// 复用 uildActivities（单条也在里面走一遍同样的聚合逻辑），
-  /// 避免「历史一套解析、实时另一套」两边口径不一致。
-  void _applyActivityEvent(Map<String, dynamic> event) {
-    final one = buildActivities([event]);
-    if (one.isEmpty) return;
-    final a = one.first;
-    setState(() {
-      final cur = _activities[a.key];
-      _activities[a.key] = cur == null ? a : _mergeActivity(cur, a);
-    });
-  }
-
-  /// 同一 step 的两次解析结果合并：按 callId 对齐，**有结果的那份优先**。
-  ChatActivity _mergeActivity(ChatActivity base, ChatActivity next) {
-    var out = base;
-    for (final e in next.entries) {
-      final existing = out.entries.where((x) => x.callId == e.callId);
-      if (existing.isEmpty) {
-        out = out.copyWithEntry(e);
-        continue;
-      }
-      final cur = existing.first;
-      // 谁有 result/error 用谁
-      final pick = (e.done && !cur.done) ? e : cur;
-      out = out.copyWithEntry(pick);
-    }
-    return out;
   }
 
   /* ---------------- 实时流 ---------------- */
@@ -297,10 +255,6 @@ class _ChatPageState extends State<ChatPage> {
             if (name == 'ask_user_question') _bumpQuestions();
           }
 
-          // 工具调用 / 结果 → 维护「进行时」行
-          if (type == 'tool/call' || type == 'tool/result') {
-            _applyActivityEvent(event);
-          }
 
           final m = ChatMessage.fromEvent(event);
           if (m == null) return;
@@ -336,7 +290,17 @@ class _ChatPageState extends State<ChatPage> {
                 }
               }
               if (idx >= 0) {
-                _messages[idx] = m;
+                /*
+                 * 把本地那条的图片字节**继承**过来。
+                 *
+                 * 宿主落盘后历史里的 image 块只剩 attachment 引用，正式事件
+                 * 拿不到 base64 —— 直接替换的话，自己刚发的照片会闪一下就变回
+                 * 占位（用户原话：「发完图看不到图」）。
+                 */
+                final localImgs = _messages[idx].images;
+                _messages[idx] = localImgs.isEmpty
+                    ? m
+                    : m.copyWith(images: [...localImgs, ...m.images]);
                 _messages.sort((a, b) => a.seq.compareTo(b.seq));
                 return;
               }
@@ -357,6 +321,159 @@ class _ChatPageState extends State<ChatPage> {
           break;
       }
     });
+  }
+
+  /* ---------------- 附件 ---------------- */
+
+  /// 底部弹层：要么挑图片，要么挑文件。
+  ///
+  /// 分两条路是因为**进会话的方式完全不同**（见 data/attachments.dart 顶部说明）：
+  /// 图片直接进消息 content，文件得先落到宿主磁盘再给路径。
+  Future<void> _showAttachSheet() async {
+    final c = DshColors.of(widget.dark);
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: c.sheetFill,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(14)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              titleAlignment: ListTileTitleAlignment.center,
+              leading: DshIcon(DshGlyph.image, size: 20, color: c.textPrimary),
+              title: Text('发送图片', style: TextStyle(color: c.textPrimary)),
+              subtitle: Text(
+                '可多选，直接进对话上下文',
+                style: TextStyle(color: c.textTertiary, fontSize: 11.5),
+              ),
+              onTap: () {
+                Navigator.pop(ctx);
+                _pickImages();
+              },
+            ),
+            ListTile(
+              titleAlignment: ListTileTitleAlignment.center,
+              leading: DshIcon(DshGlyph.fileText, size: 20, color: c.textPrimary),
+              title: Text('发送文件', style: TextStyle(color: c.textPrimary)),
+              subtitle: Text(
+                '可多选，传到宿主后把路径发给它',
+                style: TextStyle(color: c.textTertiary, fontSize: 11.5),
+              ),
+              onTap: () {
+                Navigator.pop(ctx);
+                _pickFiles();
+              },
+            ),
+            const SizedBox(height: 6),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _pickImages() async {
+    final files = await FilePicker.platform.pickFiles(
+      type: FileType.image,
+      allowMultiple: true, // 单选/多选都在同一个系统选择器里
+      withData: true, // Android 上必须带 data，否则拿不到字节
+    );
+    if (files == null || files.files.isEmpty || !mounted) return;
+
+    var added = 0;
+    final tooBig = <String>[];
+    setState(() {
+      for (final f in files.files) {
+        final bytes = f.bytes;
+        if (bytes == null) continue;
+        final a = PendingAttachment(
+          name: f.name,
+          bytes: bytes,
+          isImage: true,
+        );
+        if (!kAllowedImageTypes.contains(a.mediaType)) {
+          tooBig.add('（不支持的格式）');
+          continue;
+        }
+        if (a.sizeBytes > kMaxImageBytes) {
+          tooBig.add('（超过 8MB）');
+          continue;
+        }
+        _pending.add(a);
+        added += 1;
+      }
+    });
+    if (added > 0) _toast('已选  张图片');
+    if (tooBig.isNotEmpty) _toast('跳过：');
+  }
+
+  Future<void> _pickFiles() async {
+    final files = await FilePicker.platform.pickFiles(
+      type: FileType.any,
+      allowMultiple: true,
+      withData: true,
+    );
+    if (files == null || files.files.isEmpty || !mounted) return;
+
+    var added = 0;
+    final skipped = <String>[];
+    setState(() {
+      for (final f in files.files) {
+        final bytes = f.bytes;
+        if (bytes == null) continue;
+        if (bytes.length > kMaxFileBytes) {
+          skipped.add('（超过 20MB）');
+          continue;
+        }
+        _pending.add(PendingAttachment(name: f.name, bytes: bytes, isImage: false));
+        added += 1;
+      }
+    });
+    if (added > 0) _toast('已选  个文件');
+    if (skipped.isNotEmpty) _toast('跳过：');
+  }
+
+
+  /// 把文件逐个传到宿主，返回路径列表。失败的名字一并返回，好如实提示。
+  Future<({List<String> paths, List<String> failed})> _uploadFiles(
+    List<PendingAttachment> files,
+  ) async {
+    final paths = <String>[];
+    final failed = <String>[];
+    if (files.isEmpty) return (paths: paths, failed: failed);
+
+    // 上传目录用宿主主目录下的 .dsh\mobile-uploads（家目录从 fs.list 拿）
+    final (r, listing) = await widget.fs.list('');
+    if (!r.ok) {
+      failed.addAll(files.map((f) => f.name));
+      _toast('拿不到宿主主目录：');
+      return (paths: paths, failed: failed);
+    }
+    final dir = uploadDirFor(listing?.home ?? '');
+    if (dir.isEmpty) {
+      failed.addAll(files.map((f) => f.name));
+      _toast('宿主没返回主目录，无法上传');
+      return (paths: paths, failed: failed);
+    }
+
+    for (final f in files) {
+      final up = await widget.fs.upload(
+        dir: dir,
+        name: stampedName(f.name),
+        bytes: f.bytes,
+      );
+      if (up.ok) {
+        final p = up.value?['value']?['path'];
+        if (p is String && p.isNotEmpty) {
+          paths.add(p);
+          continue;
+        }
+      }
+      failed.add(f.name);
+    }
+    return (paths: paths, failed: failed);
   }
 
   /* ---------------- 发送 / 插话 ---------------- */
@@ -430,10 +547,25 @@ class _ChatPageState extends State<ChatPage> {
   }
 
   Future<void> _send() async {
-    final text = _input.text.trim();
-    if (text.isEmpty || _sending) return;
+    final typed = _input.text.trim();
+    final hasAttach = _pending.isNotEmpty;
+    if ((typed.isEmpty && !hasAttach) || _sending) return;
 
     setState(() => _sending = true);
+    final attachments = List<PendingAttachment>.from(_pending);
+
+    // 文件先落地换路径；图片直接进 content
+    final files = attachments.where((a) => !a.isImage).toList();
+    final (:paths, :failed) = await _uploadFiles(files);
+    if (!mounted) return;
+    if (failed.isNotEmpty) {
+      setState(() => _sending = false);
+      _toast('上传失败：${failed.join('、')}');
+      return;
+    }
+
+    final text = composeText(typed, paths);
+    final images = buildImagesPayload(attachments);
     _input.clear();
 
     /*
@@ -456,6 +588,8 @@ class _ChatPageState extends State<ChatPage> {
       'sessionId': widget.sessionId,
       'text': text,
       'mode': 'queue',
+      // 图片走 images；文件已经变成正文里的路径了
+      if (images.images.isNotEmpty) 'images': images.images,
     });
 
     if (!mounted) return;
@@ -463,12 +597,15 @@ class _ChatPageState extends State<ChatPage> {
 
     if (!r.ok) {
       // 失败要把话还给用户，不能悄悄吞掉
-      _input.text = text;
+      _input.text = typed;
       ScaffoldMessenger.of(context)
         ..clearSnackBars()
         ..showSnackBar(SnackBar(content: Text('发送失败：${r.friendlyError}')));
       return;
     }
+
+    // 发成功了才清附件：失败时用户还能直接重发，不用重新挑一遍
+    if (_pending.isNotEmpty) setState(_pending.clear);
 
     /*
      * 成功：**本地立刻插入一条用户消息**（乐观插入）。
@@ -494,7 +631,15 @@ class _ChatPageState extends State<ChatPage> {
           ? 0.0
           : _messages.map((m) => m.seq).reduce((a, b) => a > b ? a : b);
       _messages.add(
-        ChatMessage(seq: maxSeq + 0.5, role: 'user', text: text, local: true),
+        ChatMessage(
+          seq: maxSeq + 0.5,
+          role: 'user',
+          text: text,
+          // 本地先把自己的图带上：宿主落盘后历史里只剩 attachment 引用，
+          // 靠这一份才能在发出去的瞬间看到缩略图
+          images: images.images.map((e) => e['data'] as String).toList(),
+          local: true,
+        ),
       );
       _stickToBottom = true;
       _running = true;
@@ -658,22 +803,15 @@ class _ChatPageState extends State<ChatPage> {
     final showStream = streamText.isNotEmpty;
 
     /*
-     * 消息和「进行时」行要**按 seq 混排**：桌面端就是一边回答问题
-     * 一边插 `>_ 执行了命令并已写入文件`，顺序错了会看不懂。
+     * 「进行时」行（`>_ 执行了命令`）在 v0.9.3 试过一版，v0.9.4 撤掉了：
+     *   1. 一轮十几个 step，一屏全是这种行，真正的回答被挤到看不见；
+     *   2. 更严重的是它**跑完还在转圈** —— 聚合是逐条事件做的，
+     *      单条 `tool/result` 找不到对应的 call 就直接丢了，那个 step
+     *      永远等不到结果，转圈不会停。
+     * 结论：手机上不显示工具过程，用户要的是「发了什么、回了什么」。
      */
-    final entries = <_Entry>[
-      for (final m in _messages) _Entry(m.seq, m),
-      for (final a in _activities.values) _Entry(a.seq, a),
-    ]..sort((x, y) => x.seq.compareTo(y.seq));
-
-    final anyRunningActivity = _activities.values.any((a) => a.running);
-    // 正在跑、又没有工具在执行 → 就是在等模型（桌面端显示「正在分析请求」）
-    final showThinking = _running && !anyRunningActivity;
-
-    final itemCount = entries.length +
-        (showStream ? 1 : 0) +
-        (showThinking ? 1 : 0) +
-        (_hasMore ? 1 : 0);
+    final itemCount =
+        _messages.length + (showStream ? 1 : 0) + (_hasMore ? 1 : 0);
 
     if (itemCount == 0) {
       return Center(
@@ -715,61 +853,44 @@ class _ChatPageState extends State<ChatPage> {
             }
             idx -= 1;
           }
-          if (idx < entries.length) {
-            final payload = entries[idx].payload;
-            if (payload is ChatActivity) {
-              return ActivityRow(
-                activity: payload,
-                c: c,
-                expanded: _expandedActivities.contains(payload.key),
-                onToggle: () => setState(() {
-                  if (!_expandedActivities.remove(payload.key)) {
-                    _expandedActivities.add(payload.key);
-                  }
-                }),
-              );
-            }
-            return _bubble(c, payload as ChatMessage);
+          if (idx < _messages.length) {
+            return _bubble(c, _messages[idx]);
           }
-          idx -= entries.length;
-          if (showStream && idx == 0) {
-            return _bubble(
-              c,
-              ChatMessage(
-                seq: double.infinity,
-                role: 'assistant',
-                text: streamText,
-                streaming: true,
-              ),
-            );
-          }
-          if (showStream) idx -= 1;
-          // 尾部：正在等模型（桌面端的「正在分析请求」）
-          if (showThinking && idx == 0) return _thinkingRow(c);
-          return _thinkingRow(c);
+          // 最后一个：流式气泡
+          return _bubble(
+            c,
+            ChatMessage(
+              seq: double.infinity,
+              role: 'assistant',
+              text: streamText,
+              streaming: true,
+            ),
+          );
         },
       ),
     );
   }
 
-  /// 等模型时的尾部提示（对应桌面端的「正在分析请求」）。
-  Widget _thinkingRow(DshColors c) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 10, left: 2),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          SizedBox(
-            width: 11,
-            height: 11,
-            child: CircularProgressIndicator(strokeWidth: 1.6, color: c.accent),
+  /// 气泡里的一张图。
+  Widget _bubbleImage(DshColors c, {required String data}) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(8),
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxWidth: MediaQuery.sizeOf(context).width * 0.55,
+          maxHeight: 220,
+        ),
+        child: Image.memory(
+          base64Decode(data),
+          fit: BoxFit.cover,
+          errorBuilder: (_, __, ___) => Container(
+            width: 140,
+            height: 90,
+            alignment: Alignment.center,
+            color: c.inputFill,
+            child: DshIcon(DshGlyph.image, size: 18, color: c.textTertiary),
           ),
-          const SizedBox(width: 6),
-          Text(
-            '正在分析请求',
-            style: TextStyle(fontSize: 11.5, color: c.textTertiary),
-          ),
-        ],
+        ),
       ),
     );
   }
@@ -832,6 +953,21 @@ class _ChatPageState extends State<ChatPage> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisSize: MainAxisSize.min,
                 children: [
+                  // 图片块：本地刚发的（有字节）直接画；历史里的只有引用，按需取字节
+                  for (final b64 in m.images)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 6),
+                      child: _bubbleImage(c, data: b64),
+                    ),
+                  for (final ref in m.imageRefs)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 6),
+                      child: _BubbleImage(
+                        api: widget.api,
+                        c: c,
+                        ref: ref,
+                      ),
+                    ),
                   /*
                    * 正文渲染：
                    *   助手消息 → **Markdown**（宿主返回的就是标准 Markdown：
@@ -843,7 +979,7 @@ class _ChatPageState extends State<ChatPage> {
                    * 流式期间也走 Markdown：这样「生成中」的正文和落地后
                    * 长得一模一样，不会在 assistant/message 到达的瞬间重排一次。
                    */
-                  if (isUser)
+                  if (isUser && m.text.trim().isNotEmpty)
                     Text(
                       m.text,
                       style: TextStyle(
@@ -1337,9 +1473,22 @@ class _ChatPageState extends State<ChatPage> {
         children: [
           // 待接收的插话：agent 还没读到，给了个撤回的机会
           if (_pendingSteers.isNotEmpty) _pendingSteerBar(c),
+          // 待发送的附件（图片缩略图 / 文件名），发送前都能撤掉
+          if (_pending.isNotEmpty) _pendingAttachmentBar(c),
           Row(
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
+          // 附件按钮：图片 / 文件，都支持多选
+          SizedBox(
+            width: 40,
+            height: 42,
+            child: IconButton(
+              onPressed: _sending ? null : _showAttachSheet,
+              icon: DshIcon(DshGlyph.plus, size: 20, color: c.textPrimary),
+              padding: EdgeInsets.zero,
+              tooltip: '添加图片或文件',
+            ),
+          ),
           Expanded(
             child: TextField(
               controller: _input,
@@ -1419,6 +1568,84 @@ class _ChatPageState extends State<ChatPage> {
           ),
         ],
       ),
+        ],
+      ),
+    );
+  }
+
+  /// 待发送附件条：横向滚动，图片显示缩略图，文件显示名字 + 大小。
+  Widget _pendingAttachmentBar(DshColors c) {
+    return SizedBox(
+      height: 56,
+      child: ListView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.only(bottom: 6),
+        children: [
+          for (var i = 0; i < _pending.length; i++)
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  Container(
+                    width: _pending[i].isImage ? 50 : 132,
+                    height: 50,
+                    decoration: BoxDecoration(
+                      color: c.inputFill,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: c.stroke),
+                    ),
+                    clipBehavior: Clip.antiAlias,
+                    child: _pending[i].isImage
+                        ? Image.memory(
+                            _pending[i].bytes,
+                            fit: BoxFit.cover,
+                            // 缩略图解码出错就退回图标，不能整块报红
+                            errorBuilder: (_, __, ___) =>
+                                DshIcon(DshGlyph.image, size: 18, color: c.textTertiary),
+                          )
+                        : Padding(
+                            padding: const EdgeInsets.fromLTRB(8, 6, 20, 6),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Text(
+                                  _pending[i].name,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(fontSize: 11, color: c.textPrimary),
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  _pending[i].sizeText,
+                                  style: TextStyle(fontSize: 9.5, color: c.textTertiary),
+                                ),
+                              ],
+                            ),
+                          ),
+                  ),
+                  // 右上角小叉：移除这一张
+                  Positioned(
+                    right: -4,
+                    top: -4,
+                    child: GestureDetector(
+                      onTap: () => setState(() => _pending.removeAt(i)),
+                      child: Container(
+                        width: 18,
+                        height: 18,
+                        alignment: Alignment.center,
+                        decoration: BoxDecoration(
+                          color: c.textPrimary,
+                          shape: BoxShape.circle,
+                        ),
+                        child: Icon(Icons.close, size: 12, color: c.winBg),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
         ],
       ),
     );
@@ -1539,9 +1766,119 @@ class _ChatPageState extends State<ChatPage> {
   }
 }
 
-/// 列表里的一项：要么是一条消息，要么是一行「进行时」。
-class _Entry {
-  final double seq;
-  final Object payload;
-  const _Entry(this.seq, this.payload);
+
+
+/// 历史里的图片：事件只给 `attachment` 引用，字节要回头调 `session.image` 取。
+///
+/// 为什么不在加载历史时一次性取：一个会话可能有几十张图，逐个拉会把
+/// 首屏拖死。这里按需（滚到才建）拉，并且进程内缓存 —— 同一张图只取一次。
+class _BubbleImage extends StatefulWidget {
+  final DshApi api;
+  final DshColors c;
+  final Map<String, dynamic> ref;
+
+  const _BubbleImage({required this.api, required this.c, required this.ref});
+
+  @override
+  State<_BubbleImage> createState() => _BubbleImageState();
+}
+
+class _BubbleImageState extends State<_BubbleImage> {
+  static final Map<String, String> _cache = {};
+
+  String? _data;
+  bool _failed = false;
+
+  String get _id => (widget.ref['attachmentId'] ?? '').toString();
+
+  @override
+  void initState() {
+    super.initState();
+    final cached = _cache[_id];
+    if (cached != null) {
+      _data = cached;
+    } else {
+      _load();
+    }
+  }
+
+  Future<void> _load() async {
+    if (_id.isEmpty) {
+      setState(() => _failed = true);
+      return;
+    }
+    final r = await widget.api.api('session.image', {
+      'attachmentId': _id,
+      'mediaType': widget.ref['mediaType'],
+      'bytes': widget.ref['bytes'],
+      'width': widget.ref['width'],
+      'height': widget.ref['height'],
+      if (widget.ref['name'] != null) 'name': widget.ref['name'],
+    });
+    if (!mounted) return;
+    final b64 = r.ok ? r.value?['value']?['base64'] : null;
+    if (b64 is String && b64.isNotEmpty) {
+      _cache[_id] = b64;
+      setState(() => _data = b64);
+    } else {
+      setState(() => _failed = true);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = widget.c;
+    final maxW = MediaQuery.sizeOf(context).width * 0.55;
+
+    if (_data != null) {
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(8),
+        child: ConstrainedBox(
+          constraints: BoxConstraints(maxWidth: maxW, maxHeight: 220),
+          child: Image.memory(
+            base64Decode(_data!),
+            fit: BoxFit.cover,
+            errorBuilder: (_, __, ___) => _placeholder(c, '图片解不开'),
+          ),
+        ),
+      );
+    }
+
+    if (_failed) return _placeholder(c, '图片取不到');
+
+    return Container(
+      width: 160,
+      height: 100,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        color: c.inputFill,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: SizedBox(
+        width: 14,
+        height: 14,
+        child: CircularProgressIndicator(strokeWidth: 1.6, color: c.accent),
+      ),
+    );
+  }
+
+  Widget _placeholder(DshColors c, String text) {
+    return Container(
+      width: 150,
+      height: 90,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        color: c.inputFill,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          DshIcon(DshGlyph.image, size: 18, color: c.textTertiary),
+          const SizedBox(height: 4),
+          Text(text, style: TextStyle(fontSize: 10, color: c.textTertiary)),
+        ],
+      ),
+    );
+  }
 }

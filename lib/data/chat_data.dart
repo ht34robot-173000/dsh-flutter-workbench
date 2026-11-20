@@ -143,6 +143,15 @@ class ChatMessage {
 
   final String text;
 
+  /// 消息里的图片（base64，不含 `data:` 前缀）。发送时本地乐观插入的图走这里。
+  final List<String> images;
+
+  /// 历史里的图片**只有引用，没有字节**：
+  ///   `{"type":"image","attachment":{"attachmentId":"sha256:…","mediaType":"image/png","width":…,"height":…,"bytes":…}}`
+  /// 要出缩略图必须回头调 `session.image`（宿主用 attachments.readImage 校验后回 base64）。
+  /// 这里只存引用，真正的取字节交给界面上的 `_BubbleImage` 组件按需拉。
+  final List<Map<String, dynamic>> imageRefs;
+
   /// 正在流式生成中（由 chunk 帧驱动）。
   final bool streaming;
 
@@ -202,6 +211,8 @@ class ChatMessage {
     required this.seq,
     required this.role,
     required this.text,
+    this.images = const [],
+    this.imageRefs = const [],
     this.streaming = false,
     this.toolNames = const [],
     this.local = false,
@@ -213,6 +224,8 @@ class ChatMessage {
   ChatMessage copyWith({
     double? seq,
     String? text,
+    List<String>? images,
+    List<Map<String, dynamic>>? imageRefs,
     bool? streaming,
     List<String>? toolNames,
     bool? local,
@@ -221,6 +234,8 @@ class ChatMessage {
         seq: seq ?? this.seq,
         role: role,
         text: text ?? this.text,
+      images: images ?? this.images,
+      imageRefs: imageRefs ?? this.imageRefs,
         streaming: streaming ?? this.streaming,
         toolNames: toolNames ?? this.toolNames,
         local: local ?? this.local,
@@ -246,6 +261,8 @@ class ChatMessage {
 
     final content = msg['content'];
     final buf = StringBuffer();
+    final images = <String>[];
+    final imageRefs = <Map<String, dynamic>>[];
     if (content is List) {
       for (final block in content) {
         if (block is! Map) continue;
@@ -254,7 +271,16 @@ class ChatMessage {
             buf.write((block['text'] ?? '').toString());
             break;
           case 'image':
-            buf.write('[图片]');
+            // 三种情况：带 data（少见）、带 attachment 引用（历史的常态）、啥也没有
+            final d = block['data'];
+            final ref = block['attachment'];
+            if (d is String && d.isNotEmpty) {
+              images.add(d);
+            } else if (ref is Map && (ref['attachmentId'] ?? '').toString().isNotEmpty) {
+              imageRefs.add(ref.cast<String, dynamic>());
+            } else {
+              buf.write('[图片]');
+            }
             break;
           case 'file':
             buf.write('[文件]');
@@ -264,7 +290,8 @@ class ChatMessage {
     }
 
     final text = buf.toString();
-    if (text.trim().isEmpty) return null;
+    // 纯图片消息（不带文字）也要保留，否则自己发的照片在界面上根本不存在
+    if (text.trim().isEmpty && images.isEmpty && imageRefs.isEmpty) return null;
 
     final seqRaw = ev['seq'];
     final seq = (seqRaw is num) ? seqRaw.toDouble() : 0.0;
@@ -284,6 +311,8 @@ class ChatMessage {
       seq: seq,
       role: type == 'user/message' ? 'user' : 'assistant',
       text: text,
+      images: images,
+      imageRefs: imageRefs,
       isQuestionReply: srcKind == 'user-question-reply',
       reply: srcKind == 'user-question-reply' ? QuestionReply.tryParse(text) : null,
       sourceKind: srcKind.isEmpty ? null : srcKind,
@@ -295,11 +324,6 @@ class ChatMessage {
 class HistoryPage {
   final List<ChatMessage> messages;
 
-  /// 原始事件（只留 map 形态的）。
-  ///
-  /// 消息只是其中一类：	ool/call / 	ool/result 不产出气泡，但对话里的
-  /// 「执行了命令并已写入文件」那几行要靠它们重建（见 data/chat_activity.dart）。
-  final List<Map<String, dynamic>> rawEvents;
   final bool hasMore;
   final double? beforeSeq;
   final int totalCount;
@@ -307,7 +331,6 @@ class HistoryPage {
   const HistoryPage({
     required this.messages,
     required this.hasMore,
-    this.rawEvents = const [],
     this.beforeSeq,
     this.totalCount = 0,
   });
@@ -315,13 +338,11 @@ class HistoryPage {
   factory HistoryPage.fromJson(Map<String, dynamic>? value) {
     final events = value?['events'];
     final msgs = <ChatMessage>[];
-    final raw = <Map<String, dynamic>>[];
+
     if (events is List) {
       for (final e in events) {
         if (e is! Map) continue;
-        final map = e.cast<String, dynamic>();
-        raw.add(map);
-        final m = ChatMessage.fromEvent(map);
+        final m = ChatMessage.fromEvent(e.cast<String, dynamic>());
         if (m != null) msgs.add(m);
       }
     }
@@ -330,7 +351,6 @@ class HistoryPage {
     final bs = value?['beforeSeq'];
     return HistoryPage(
       messages: msgs,
-      rawEvents: raw,
       hasMore: value?['hasMore'] == true,
       beforeSeq: bs is num ? bs.toDouble() : null,
       totalCount: (value?['totalCount'] is num)
