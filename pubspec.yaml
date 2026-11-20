@@ -13,7 +13,8 @@ publish_to: 'none'
 #   0.8.2 —— 圆形揭示的圆心改到主题按钮本身（之前用的是整屏中心）
 #   0.8.3 —— 对话正文渲染 Markdown（粗体/代码块/表格/链接）
 #   0.8.4 —— 对话文字可选中复制 + 正文里的路径一键开资源管理器
-version: 0.8.5+805
+version: 0.9.0+900
+
 
 
 environment:
@@ -45,6 +46,9 @@ dependencies:
   # 代码高亮（Kotlin 版自研过一版，Flutter 这边有现成的）
   flutter_highlight: ^0.7.0
   highlight: ^0.7.0
+
+  # 打开外链（充值 / 用量明细 / 仓库地址）。不用它就得让用户复制粘贴，多一步。
+  url_launcher: ^6.3.0
 
   # 文件选择 / 保存
   file_picker: ^8.1.6

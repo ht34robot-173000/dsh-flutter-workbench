@@ -15,6 +15,7 @@ import 'data/live.dart';
 import 'data/prefs.dart';
 import 'ui/chat_page.dart';
 import 'ui/file_browser_page.dart';
+import 'ui/profile_page.dart';
 import 'ui/scan_page.dart';
 import 'ui/update_page.dart';
 import 'ui/icons.dart';
@@ -321,7 +322,31 @@ class _HomePageState extends State<HomePage> {
                   onOpenSession: (s) => _openChat(context, state, s, dark),
                 )
               : _NotReady(dark: dark),
-          _ProfilePlaceholder(dark: dark),
+          ProfilePage(
+            api: state.api,
+            dark: dark,
+            onOpenFiles: () => Navigator.of(context).push(
+              MaterialPageRoute(
+                builder: (_) => FileBrowserPage(fs: state.fsApi, dark: dark),
+              ),
+            ),
+            onOpenSettings: () => Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => const SettingsPage()),
+            ),
+            onOpenUpdate: () => Navigator.of(context).push(
+              MaterialPageRoute(
+                builder: (_) => UpdatePage(
+                  dark: dark,
+                  repo: state.prefs.updateRepo,
+                  apiBase: state.prefs.updateApi,
+                  onSaveConfig: (repo, api) async {
+                    await state.prefs.setUpdateRepo(repo);
+                    await state.prefs.setUpdateApi(api);
+                  },
+                ),
+              ),
+            ),
+          ),
         ],
       ),
     );
@@ -493,23 +518,6 @@ class _NotReady extends StatelessWidget {
             ),
           ],
         ),
-      ),
-    );
-  }
-}
-
-/// 「我的」页占位（阶段⑤或更晚接入账号与余额）。
-class _ProfilePlaceholder extends StatelessWidget {
-  final bool dark;
-  const _ProfilePlaceholder({required this.dark});
-
-  @override
-  Widget build(BuildContext context) {
-    final c = DshColors.of(dark);
-    return Center(
-      child: Text(
-        '「我的」页在后续阶段接入',
-        style: TextStyle(color: c.textTertiary, fontSize: 12.5),
       ),
     );
   }
