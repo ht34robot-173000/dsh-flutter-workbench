@@ -108,18 +108,51 @@ class AppState extends ChangeNotifier {
   /// 现在每 4 秒复查一次；一旦连上，顺手把会话缓存清掉重拉，
   /// 用户看到的是「等一会儿自己好了」。
   Timer? _health;
+  int _tick = 0;
+
+  /// 是否刚点了「重启 DSH」。
+  ///
+  /// 重启后宿主会死十几秒，但**这期间 `connOk` 还是 true**（上一次探测是成功的）。
+  /// 上一版巡检第一句就是 `if (connOk == true) return;` —— 于是重启后一次都不会探，
+  /// 表现就是「点了重启，永远连不回来，得杀进程」。
+  bool restartPending = false;
+
+  void noteRestartRequested() {
+    restartPending = true;
+    // 立刻探一次，别等下一个 tick
+    unawaited(_probe());
+  }
+
   void _watchHealth() {
     _health?.cancel();
-    _health = Timer.periodic(const Duration(seconds: 4), (_) async {
-      if (connOk == true) return;
-      final was = connOk;
-      await checkConnection();
-      if (connOk == true && was != true) {
-        // 刚恢复：旧列表作废，重新拉一次
-        SessionStore.instance.reset();
-        await SessionStore.instance.load(api, force: true);
-      }
+    _health = Timer.periodic(const Duration(seconds: 5), (_) async {
+      _tick++;
+      /*
+       * 什么时候探：
+       *   - 刚点过重启：每 5 秒都探（要尽快发现它回来了）
+       *   - 已知断线：每 5 秒探（这就是上一版的行为）
+       *   - 一切正常：也要探！每 15 秒一次（tick 3 次）
+       *
+       * 第三条是关键：宿主可能在我们完全不知情的情况下死掉又活过来
+       * （比如在电脑上重启），`connOk` 一直是 true，不主动探就永远发现不了。
+       */
+      final needProbe = restartPending || connOk != true || _tick % 3 == 0;
+      if (!needProbe) return;
+      await _probe();
     });
+  }
+
+  Future<void> _probe() async {
+    final was = connOk;
+    await checkConnection();
+    if (connOk == true && (restartPending || was != true)) {
+      debugPrint('[health] 连接恢复 → 清缓存并重载列表');
+      restartPending = false;
+      SessionStore.instance.reset();
+      await SessionStore.instance.load(api, force: true);
+    } else if (connOk != true) {
+      debugPrint('[health] 探测失败：$connHint');
+    }
   }
 
   @override
@@ -510,9 +543,16 @@ class _HomePageState extends State<HomePage> {
         ),
       ),
       onRestarted: () {
-        // 重启后宿主会断一轮：清掉缓存，等十几秒再探一次连接
+        /*
+         * 重启后宿主会死十几秒。这里**不能**只 `reset()` 就完事：
+         * 之前只安排了一次「12 秒后 checkConnection」，可是那一次很容易
+         * 落在隧道还没回来的窗口里 —— 失败之后没有任何人再试，界面就永远停住。
+         *
+         * 现在把「正在等重启」这个状态记到 AppState 里：
+         * 巡检看到它就会每 5 秒探一次，直到真的连上（然后自动重载列表）。
+         */
+        state.noteRestartRequested();
         SessionStore.instance.reset();
-        Future<void>.delayed(const Duration(seconds: 12), state.checkConnection);
       },
     );
   }
@@ -1162,7 +1202,6 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 }
-
 
 
 

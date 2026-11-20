@@ -122,6 +122,7 @@ class _ChatPageState extends State<ChatPage> {
 
   @override
   void dispose() {
+    _retryTimer?.cancel();
     _scroll.removeListener(_onScroll);
     _liveSub?.cancel();
     /*
@@ -146,6 +147,20 @@ class _ChatPageState extends State<ChatPage> {
 
   /* ---------------- 历史 ---------------- */
 
+  /// 历史加载失败后的自动重试计数与计时器。
+  int _retryCount = 0;
+  Timer? _retryTimer;
+
+  void _scheduleHistoryRetry() {
+    if (_retryCount >= 24) return;
+    _retryTimer?.cancel();
+    _retryTimer = Timer(const Duration(seconds: 5), () {
+      if (!mounted) return;
+      _retryCount++;
+      _loadHistory();
+    });
+  }
+
   Future<void> _loadHistory() async {
     if (mounted) setState(() => _loading = true);
     final r = await widget.api.api('session.history', {
@@ -158,8 +173,18 @@ class _ChatPageState extends State<ChatPage> {
         _loading = false;
         _error = r.friendlyError;
       });
+      /*
+       * 失败自动重试。
+       *
+       * 场景：桌面正在重启（或隧道刚断），进对话页时历史拉不到 ——
+       * 原来只会停在错误页，用户得自己点「重试」或杀进程。
+       * 这里每 5 秒自己再试一次，最多 24 次（约两分钟），
+       * 覆盖宿主重启的那十几秒绰绰有余。
+       */
+      _scheduleHistoryRetry();
       return;
     }
+    _retryCount = 0;
     final page = HistoryPage.fromJson(
       r.value?['value'] as Map<String, dynamic>?,
     );
