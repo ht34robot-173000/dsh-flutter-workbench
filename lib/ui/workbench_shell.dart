@@ -20,6 +20,7 @@ library;
 import 'package:flutter/material.dart';
 
 import 'icons.dart';
+import 'theme_toggle.dart';
 import 'theme.dart';
 
 /// 一屏的外壳：Mica 背景 + 标题栏 + 内容 + 底部两格 + **左侧抽屉**。
@@ -39,7 +40,6 @@ class WorkbenchShell extends StatefulWidget {
 
   /// 切主题。**回调会带上按钮自己的屏幕坐标**（圆心），
   /// 圆形揭示就从按钮位置扩散开；拿不到坐标时给 null（退化成屏幕中心）。
-  final ValueChanged<Offset?> onToggleTheme;
 
   final VoidCallback onSettings;
 
@@ -49,7 +49,6 @@ class WorkbenchShell extends StatefulWidget {
     required this.body,
     required this.currentTab,
     required this.onTab,
-    required this.onToggleTheme,
     required this.onSettings,
     this.drawer,
   });
@@ -74,6 +73,14 @@ class _WorkbenchShellState extends State<WorkbenchShell> {
     return Scaffold(
       key: _scaffoldKey,
       drawer: widget.drawer,
+      /*
+       * 从左往右滑动打开抽屉。
+       *
+       * 默认只有**屏幕最左 20dp** 能起手（drawerEdgeDragWidth 默认 20），
+       * 手机上很难摸到。这里放宽到屏幕宽度的 45%：首页列表是纵向滚动，
+       * 横向拖动本来没有别的用途，所以放宽不会抢手势。
+       */
+      drawerEdgeDragWidth: MediaQuery.sizeOf(context).width * 0.45,
       // 透明：让下面的 Mica 背景透上来。
       // 给 backgroundColor 会让它盖住 Mica，背景就变成一片纯色。
       backgroundColor: Colors.transparent,
@@ -113,11 +120,7 @@ class _WorkbenchShellState extends State<WorkbenchShell> {
               ),
             ),
           ),
-          _ThemeToggleButton(
-            glyph: DshGlyph.contrast,
-            color: c.textPrimary,
-            onTap: widget.onToggleTheme,
-          ),
+          ThemeToggleButton(color: c.textPrimary),
           _iconButton(DshGlyph.settings, c.textPrimary, widget.onSettings),
         ],
       ),
@@ -210,44 +213,3 @@ class _WorkbenchShellState extends State<WorkbenchShell> {
 ///
 /// 必须做成 StatefulWidget：`GlobalKey` 只在 State 里建一次才有稳定身份。
 /// 在 build 里现造 GlobalKey 会让元素每帧重新挂载，坐标也跟着抖。
-class _ThemeToggleButton extends StatefulWidget {
-  final DshGlyph glyph;
-  final Color color;
-  final ValueChanged<Offset?> onTap;
-
-  const _ThemeToggleButton({
-    required this.glyph,
-    required this.color,
-    required this.onTap,
-  });
-
-  @override
-  State<_ThemeToggleButton> createState() => _ThemeToggleButtonState();
-}
-
-class _ThemeToggleButtonState extends State<_ThemeToggleButton> {
-  final _key = GlobalKey();
-
-  void _handleTap() {
-    final ro = _key.currentContext?.findRenderObject();
-    Offset? center;
-    if (ro is RenderBox && ro.hasSize && ro.attached) {
-      // localToGlobal 给的是根视图坐标，和 ThemeRevealScope 里
-      // MediaQuery.sizeOf 的坐标系一致（都是逻辑像素、都从屏幕左上角算）
-      center = ro.localToGlobal(ro.size.center(Offset.zero));
-    }
-    widget.onTap(center);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return IconButton(
-      key: _key,
-      onPressed: _handleTap,
-      icon: DshIcon(widget.glyph, size: 20, color: widget.color),
-      constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-      splashRadius: 20,
-    );
-  }
-}

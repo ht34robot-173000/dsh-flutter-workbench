@@ -36,6 +36,7 @@ import '../data/live.dart';
 import '../data/path_scan.dart';
 import 'file_browser_page.dart';
 import 'icons.dart';
+import 'theme_toggle.dart';
 import 'markdown_view.dart';
 import 'question_panel.dart';
 import 'theme.dart';
@@ -769,6 +770,8 @@ class _ChatPageState extends State<ChatPage> {
                 ),
               ),
             ),
+          // 每个页面都能切主题
+          ThemeToggleButton(color: c.textPrimary),
         ],
       ),
     );

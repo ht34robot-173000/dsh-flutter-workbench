@@ -6,6 +6,16 @@
     -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-permission android:name="android.permission.INTERNET" />
+    <!--
+      后台常驻（KeepAliveService）：
+        FOREGROUND_SERVICE           —— Android 9+ 起前台服务必须声明
+        FOREGROUND_SERVICE_DATA_SYNC —— Android 14+ 要求按类型声明权限
+        POST_NOTIFICATIONS           —— Android 13+ 通知要运行时授权；
+                                       没授权服务照样跑，只是通知栏看不到
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <application
         android:label="DSH 工作台"
         android:name="${applicationName}"
@@ -32,6 +42,15 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+        <!--
+          后台常驻服务。dataSync 是最贴近本应用的类型（持续 sync 一条长连接）。
+          STOP_STICKY 由服务自己在 onStartCommand 里返回，不写在这里。
+        -->
+        <service
+            android:name=".KeepAliveService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

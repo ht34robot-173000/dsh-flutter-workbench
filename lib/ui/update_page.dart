@@ -22,6 +22,7 @@ import 'package:package_info_plus/package_info_plus.dart';
 import '../data/installer.dart';
 import '../data/update_api.dart';
 import 'icons.dart';
+import 'theme_toggle.dart';
 import 'theme.dart';
 
 class UpdatePage extends StatefulWidget {
@@ -428,6 +429,9 @@ class _UpdatePageState extends State<UpdatePage> {
             onPressed: () => Navigator.of(context).pop(),
           ),
           const SizedBox(width: 2),
+          const Spacer(),
+          // 每个页面都能切主题
+          ThemeToggleButton(color: c.textPrimary),
           Text(
             '应用内更新',
             style: TextStyle(

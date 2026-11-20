@@ -21,6 +21,7 @@ import 'package:mobile_scanner/mobile_scanner.dart';
 
 import '../data/scan_parse.dart';
 import 'icons.dart';
+import 'theme_toggle.dart';
 import 'theme.dart';
 
 /// 扫码页。成功时 `Navigator.pop` 回一个 [PairScanResult]。
@@ -195,6 +196,9 @@ class _ScanPageState extends State<ScanPage> {
             onPressed: () => Navigator.of(context).pop(),
           ),
           const SizedBox(width: 2),
+          const Spacer(),
+          // 每个页面都能切主题
+          ThemeToggleButton(color: c.textPrimary),
           Text(
             '扫码配对',
             style: TextStyle(

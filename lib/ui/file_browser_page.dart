@@ -16,6 +16,7 @@ import 'package:flutter/services.dart';
 
 import '../data/fs_api.dart';
 import 'icons.dart';
+import 'theme_toggle.dart';
 import 'theme.dart';
 
 class FileBrowserPage extends StatefulWidget {
@@ -584,6 +585,8 @@ class _FileBrowserPageState extends State<FileBrowserPage> {
                   ),
                 ),
               ),
+              // 每个页面都能切主题
+              ThemeToggleButton(color: c.textPrimary),
               IconButton(
                 tooltip: _showHidden ? '隐藏 .开头的项' : '显示隐藏项',
                 icon: DshIcon(

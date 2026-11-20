@@ -10,6 +10,7 @@ import 'package:flutter/material.dart';
 
 import 'data/ds_api.dart';
 import 'data/fs_api.dart';
+import 'data/keep_alive.dart' as alive;
 import 'data/scan_parse.dart';
 import 'data/live.dart';
 import 'data/prefs.dart';
@@ -25,6 +26,7 @@ import 'data/system_api.dart';
 import 'ui/session_list_page.dart';
 import 'ui/theme.dart';
 import 'ui/theme_reveal.dart';
+import 'ui/theme_toggle.dart';
 import 'ui/workbench_shell.dart';
 
 /// 迁移进度 —— 打印在「我的」页上，随时能看出这个版本到哪一步了。
@@ -84,6 +86,8 @@ class AppState extends ChangeNotifier {
     showArchived = prefs.showArchived;
     ready = true;
     notifyListeners();
+    // 前台服务：App 退到后台后进程不被回收，SSE 长连接能一直挂着
+    await alive.KeepAlive.start();
     await checkConnection();
   }
 
@@ -236,6 +240,16 @@ class _DshWorkbenchAppState extends State<DshWorkbenchApp> {
   Widget build(BuildContext context) {
     return AppScope(
       state: _state,
+      /*
+       * 注意：**不能**把 PopScope 放在这层。
+       *
+       * 这一层在 MaterialApp 之上，根本不在 Navigator 的路由树里 ——
+       * `canPop: false` 对它不起作用，返回键照样把整个 App 顶回桌面（实测过）。
+       *
+       * 正确的落点是首页那条路由自己的 build 里（见 HomePage.build），
+       * 那样它只拦「当前是首页」的情况；对话页 / 文件管理页是独立路由，
+       * 返回键照常 pop 回上一级。
+       */
       child: ListenableBuilder(
         listenable: _state,
         builder: (context, _) {
@@ -254,20 +268,30 @@ class _DshWorkbenchAppState extends State<DshWorkbenchApp> {
             debugShowCheckedModeBanner: false,
             title: 'DSH 工作台',
             theme: colors.toThemeData(),
-            home: ThemeRevealScope(
+            /*
+             * 揭示动画挂在 `builder` 上（包住整个 Navigator），不是只包 HomePage。
+             *
+             * 原来只包 home：在对话页 / 文件管理页点主题按钮时，
+             * 状态里的 `revealToDark` 被置上，但那里没有 ThemeRevealScope 去抓帧，
+             * `commitTheme` 永远不被调用 —— 表现就是「点了没反应」，
+             * 而且 `revealToDark` 卡住不清。现在每个页面都在揭示层里面。
+             */
+            builder: (context, child) => ThemeRevealScope(
               active: _state.revealToDark != null,
               toDark: _state.revealToDark ?? false,
               origin: _state.revealOrigin,
               // 抓帧完成才换主题；动画播完只回收圆心
               onCaptured: _state.commitTheme,
               onCompleted: _state.finishReveal,
-              child: const HomePage(),
+              child: child ?? const SizedBox.shrink(),
             ),
+            home: const HomePage(),
           );
         },
       ),
     );
   }
+
 }
 
 /// 首页：会话列表（阶段②）。
@@ -311,12 +335,31 @@ class _HomePageState extends State<HomePage> {
     // 不如直接说清楚该做什么。
     final ready = state.api.hasCookie && state.prefs.baseUrl.isNotEmpty;
 
-    return WorkbenchShell(
+    /*
+     * 首页拦住返回键（用户要求：App 内点返回不能退出）。
+     *
+     * 必须放在**这条路由的 build 里**：放在 MaterialApp 之上（AppScope 那层）
+     * 对路由 pop 完全不起作用 —— 实测按返回照样退回桌面。
+     *
+     * 只拦首页这一条路由；对话页 / 文件管理页是 push 上去的独立路由，
+     * 返回键照常 pop 回上一级。真正的退出方式：从「最近任务」划掉。
+     */
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop) return;
+        ScaffoldMessenger.of(context)
+          ..clearSnackBars()
+          ..showSnackBar(const SnackBar(
+            content: Text('后台运行中 —— 要退出请从「最近任务」里划掉'),
+            duration: Duration(seconds: 2),
+          ));
+      },
+      child: WorkbenchShell(
       dark: dark,
       currentTab: _tab,
       onTab: (i) => setState(() => _tab = i),
       drawer: _buildDrawer(context, state, dark),
-      onToggleTheme: (origin) => state.toggleTheme(origin: origin),
       onSettings: () => Navigator.of(context).push(
         MaterialPageRoute(builder: (_) => const SettingsPage()),
       ),
@@ -343,6 +386,7 @@ class _HomePageState extends State<HomePage> {
               : _NotReady(dark: dark),
           ProfilePage(api: state.api, dark: dark),
         ],
+      ),
       ),
     );
   }
@@ -575,7 +619,7 @@ class _HomeDrawerState extends State<_HomeDrawer> {
           children: [
             // 品牌头
             Padding(
-              padding: const EdgeInsets.fromLTRB(18, 18, 18, 10),
+              padding: const EdgeInsets.fromLTRB(18, 18, 10, 10),
               child: Row(
                 children: [
                   DshIcon(DshGlyph.chat, size: 20, color: c.accent),
@@ -588,6 +632,9 @@ class _HomeDrawerState extends State<_HomeDrawer> {
                       color: c.textPrimary,
                     ),
                   ),
+                  const Spacer(),
+                  // 侧边栏里也能切主题（用户要求：任何页面都要有）
+                  ThemeToggleButton(color: c.textPrimary, size: 19),
                 ],
               ),
             ),
@@ -917,7 +964,13 @@ class _SettingsPageState extends State<SettingsPage> {
     final c = DshColors.of(dark);
 
     return Scaffold(
-      appBar: AppBar(title: const Text('连接设置')),
+      appBar: AppBar(
+        title: const Text('连接设置'),
+        actions: [
+          // 每个页面都能切主题
+          ThemeToggleButton(color: c.textPrimary),
+        ],
+      ),
       /*
        * 键盘避让 —— 阶段①实测踩到的真问题。
        *
@@ -1060,7 +1113,6 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 }
-
 
 
 
