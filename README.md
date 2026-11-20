@@ -1,5 +1,9 @@
 # DSH 工作台 · Flutter 版
 
+<p align="left">
+  <img src="docs/icon-512.png" width="96" alt="DSH 工作台图标">
+</p>
+
 DSH（DeepSeek Harness）桌面版的**手机端远控客户端**。用手机浏览会话、看实时输出、发消息、传文件。
 
 Flutter 重写版，与早期 Kotlin 版并存（包名不同，可同时安装）：

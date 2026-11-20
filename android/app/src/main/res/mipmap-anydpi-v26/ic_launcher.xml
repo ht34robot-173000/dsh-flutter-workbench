@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  自适应图标（Android 8.0+ / API 26）。
+
+  三层：
+    background —— res/drawable/ic_launcher_background.xml（竖向渐变，和深色主题同源）
+    foreground —— mipmap-*/ic_launcher_foreground.png（气泡 + ›_ ，内容压在中间 66% 安全区）
+    monochrome —— Android 13 主题图标用的单色剪影（系统会自己上色）
+
+  为什么前景要单独一张：自适应图标会被各家启动器裁成圆形/方形/水滴形，
+  内容超出安全区就会被切掉。母图是 108dp，内容只占中间 72dp。
+-->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@drawable/ic_launcher_background" />
+    <foreground android:drawable="@mipmap/ic_launcher_foreground" />
+    <monochrome android:drawable="@mipmap/ic_launcher_monochrome" />
+</adaptive-icon>

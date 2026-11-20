@@ -1,12 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Modify this file to customize your launch splash screen -->
-<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
-    <item android:drawable="@android:color/white" />
+<!--
+  启动瞬间的底色。
 
-    <!-- You can insert your own image assets here -->
-    <!-- <item>
-        <bitmap
-            android:gravity="center"
-            android:src="@mipmap/launch_image" />
-    </item> -->
+  原来是纯白：App 本身是深色 + Mica 磨砂，冷启动时会先闪一下白再变黑，
+  很刺眼。改成图标同款深蓝，视觉上「桌面点图标 → 直接进 App」连贯。
+  第一帧起来后由 Flutter 接管，浅色主题也照样是这个过渡。
+-->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@drawable/ic_launcher_background" />
 </layer-list>
