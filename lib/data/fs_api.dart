@@ -241,6 +241,58 @@ class FsApi {
   Future<ApiResult> copy(String from, String to) =>
       _post('fs.copy', {'from': from, 'to': to});
 
+  /// 下载到**本地文件**，直接流式写盘。
+  ///
+  /// 为什么不用 `downloadBytes`：
+  ///   - 它把整个文件读进内存（36 MB 的 APK 直接吃满堆），
+  ///   - 而且全部请求共用的 `receiveTimeout = 60s` —— 走公网隧道实测
+  ///     36.8 MB 要 41 秒，手机 4G 上更慢，一超时就抛 DioException，
+  ///     `friendlyError` 又把它说成「手机和电脑不在同一个网络」（误导）。
+  ///
+  /// 这里给下载单独放宽超时，并且流式落盘、按块回报进度。
+  Future<ApiResult> downloadToFile({
+    required String path,
+    required String savePath,
+    void Function(int received, int total)? onProgress,
+  }) async {
+    try {
+      final res = await _dio.download(
+        '/rw/api/fs.download',
+        savePath,
+        queryParameters: {'path': path},
+        deleteOnError: true,
+        options: Options(
+          responseType: ResponseType.stream,
+          // 大文件：连接 15 秒够，但**传输**要给足时间（默认 60 秒会截断）
+          receiveTimeout: const Duration(minutes: 10),
+          sendTimeout: const Duration(minutes: 10),
+        ),
+        onReceiveProgress: onProgress,
+      );
+      final code = res.statusCode ?? 0;
+      if (code != 200) {
+        return ApiResult(
+          ok: false,
+          statusCode: code,
+          errorCode: 'http-$code',
+        );
+      }
+      return const ApiResult(ok: true);
+    } on DioException catch (e) {
+            // 这里用 DshApi 的同一套文案，保证「超时」和「连不上」不会混成一句
+      final type = e.type;
+      if (type == DioExceptionType.connectionTimeout ||
+          type == DioExceptionType.sendTimeout ||
+          type == DioExceptionType.receiveTimeout) {
+        return ApiResult.network('下载超时（文件较大或网络太慢）');
+      }
+      if (type == DioExceptionType.connectionError) {
+        return ApiResult.network('连不上 ${_dio.options.baseUrl}');
+      }
+      return ApiResult.network(e.message ?? '网络错误');
+    }
+  }
+
   /// 上传一个文件到目录。
   ///
   /// 走 `fs.upload` + base64 —— 和 Kotlin 版一致。

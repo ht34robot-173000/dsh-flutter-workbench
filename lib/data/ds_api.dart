@@ -45,7 +45,18 @@ class ApiResult {
   String get friendlyError {
     switch (errorCode) {
       case 'network':
-        return '连不上服务器 —— 检查地址对不对、手机和电脑在不在同一个网络';
+        /*
+         * 别把网络层错误一律说成「不同网络」。
+         *
+         * 原来这里固定返回「连不上服务器 —— 检查地址对不对、手机和电脑在不在同一个网络」，
+         * 结果**超时**也报这句话：用户去查网段、重配对，白折腾。
+         * errorMessage 里已经区分了 超时 / 连不上 / 证书失败（见 _describeDio），
+         * 直接用它；只有真的没有细节时才退回通用提示。
+         */
+        final detail = (errorMessage ?? '').trim();
+        return detail.isEmpty
+            ? '连不上服务器 —— 检查地址对不对、手机和电脑在不在同一个网络'
+            : detail;
       case 'unpaired':
         return '设备未配对 —— 去设置里扫码或输入配对码';
       case 'loopback-only':
@@ -205,6 +216,8 @@ class DshApi {
       errorMessage: err is Map ? (err['message']?.toString()) : null,
     );
   }
+
+  String describeDioError(DioException e) => _describeDio(e);
 
   String _describeDio(DioException e) {
     switch (e.type) {

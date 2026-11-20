@@ -10,6 +10,7 @@ library;
 import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -253,65 +254,163 @@ class _FileBrowserPageState extends State<FileBrowserPage> {
     }
   }
 
-  /// 下载到本地。
+  /// 下载到本地：**交给系统下载器**（浏览器 / DownloadManager）。
   ///
-  /// 用带 cookie 的 `fs.download` 直接取字节，然后写到 Android 的
-  /// 公共 Downloads 目录 —— 不引 path_provider，直接写绝对路径
-  /// （和踩坑文档 6.6 的做法一致，应用无需权限即可写 Pictures/Downloads）。
+  /// 这是老版本（Kotlin）的做法，也是用户说的「老版本下载速度很快」的原因：
+  /// Kotlin 版根本没有在 App 里搬字节，而是先换一次性票据，再
+  /// `Intent.ACTION_VIEW` 把 URL 丢给系统 —— 平台下载器有自己的连接池、
+  /// 后台队列和断点续传，比在 Flutter 里单流拉快得多，还不占界面。
+  ///
+  /// 只有系统里打不开浏览器时才回落到应用内流式下载（[_saveInApp]）。
   Future<void> _saveToLocal(FsEntry e) async {
+    final (r, url) = await widget.fs.ticket(e.path);
     if (!mounted) return;
-    _toast('下载中 ${formatBytes(e.size)}…');
-
-    final (r, bytes) = await widget.fs.downloadBytes(e.path);
-    if (!mounted) return;
-    if (!r.ok || bytes == null) {
-      _toast('下载失败：${r.friendlyError}');
+    if (!r.ok || url == null) {
+      _toast('取下载链接失败：${r.friendlyError}');
       return;
     }
 
-    try {
-      final saved = await _writeToDownloads(e.name, bytes);
-      if (!mounted) return;
-      if (saved == null) {
-        // 写不了就退回「复制链接」，别让用户空手
-        final (tr, url) = await widget.fs.ticket(e.path);
-        if (!mounted) return;
-        if (tr.ok && url != null) {
-          await Clipboard.setData(ClipboardData(text: url));
-          _toast('存到本地失败，已复制下载链接（60 秒有效）');
-        } else {
-          _toast('存到本地失败');
-        }
-      } else {
-        _toast('已保存到 $saved');
+    final uri = Uri.tryParse(url);
+    var handoff = false;
+    if (uri != null) {
+      try {
+        handoff = await launchUrl(uri, mode: LaunchMode.externalApplication);
+      } catch (_) {
+        handoff = false;
       }
-    } catch (err) {
-      if (!mounted) return;
-      _toast('保存失败：$err');
     }
+
+    if (!mounted) return;
+    if (handoff) {
+      _toast('已交给系统下载器，浏览器里能看到进度');
+      return;
+    }
+    // 没有浏览器可用：退回应用内下载（慢一点，但能落地）
+    _toast('没有可用的浏览器，改用应用内下载');
+    await _saveInApp(e);
   }
 
-  /// 把字节写到公共 Downloads 目录。返回实际路径，失败返回 null。
-  static Future<String?> _writeToDownloads(String name, List<num> bytes) async {
-    final safe = name.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
+  /// 应用内流式下载（兜底）。
+  ///
+  /// 旧实现是 `downloadBytes` + `writeAsBytesSync`，两个坑：
+  ///   1. 36 MB 的 APK 整块进内存；
+  ///   2. 用的是全局 `receiveTimeout = 60s` —— 公网隧道实测 41 秒，
+  ///      手机 4G 更慢，一超时就抛 DioException，而 `friendlyError`
+  ///      把网络层错误统一说成「手机和电脑不在同一个网络」（误导用户）。
+  ///
+  /// 现在：`downloadToFile` 让 Dio 直接往目标路径流式写，超时放宽到 10 分钟，
+  /// 并显示百分比进度；失败会删掉半截文件。
+  Future<void> _saveInApp(FsEntry e) async {
+    // 目标目录：公共 Downloads（免权限，见踩坑文档 6.6）
+    final safe = e.name.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
     final stamp = DateTime.now().millisecondsSinceEpoch;
-    // 加时间戳前缀，避免重名覆盖
-    final fileName = '${stamp}_$safe';
+    String? target;
     for (final dir in ['/storage/emulated/0/Download', '/sdcard/Download']) {
       try {
         final d = Directory(dir);
         if (!d.existsSync()) d.createSync(recursive: true);
-        final file = File('$dir/$fileName');
-        file.writeAsBytesSync(
-          bytes.map((e) => e.toInt()).toList(),
-          flush: true,
-        );
-        if (file.existsSync() && file.lengthSync() > 0) return file.path;
+        target = '$dir/${stamp}_$safe';
+        break;
       } catch (_) {
         // 换下一个候选目录
       }
     }
-    return null;
+    if (target == null) {
+      _toast('手机上没有可写的 Download 目录');
+      return;
+    }
+
+    final progress = ValueNotifier<double>(0);
+    var dialogOpen = true;
+    if (mounted) {
+      showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (ctx) {
+          final c = DshColors.of(widget.dark);
+          return Dialog(
+            backgroundColor: c.sheetFill,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(18, 16, 18, 16),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '下载中',
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.bold,
+                      color: c.textPrimary,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    '${e.name}（${formatBytes(e.size)}）',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(fontSize: 11.5, color: c.textTertiary),
+                  ),
+                  const SizedBox(height: 12),
+                  ValueListenableBuilder<double>(
+                    valueListenable: progress,
+                    builder: (_, v, __) => Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(3),
+                          child: LinearProgressIndicator(
+                            value: v <= 0 ? null : v,
+                            minHeight: 5,
+                            backgroundColor: c.stroke,
+                            color: c.accent,
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          v <= 0
+                              ? '连接中…'
+                              : '${(v * 100).toStringAsFixed(0)}%',
+                          style: TextStyle(
+                            fontSize: 10.5,
+                            color: c.textTertiary,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      ).whenComplete(() => dialogOpen = false);
+    }
+
+    final r = await widget.fs.downloadToFile(
+      path: e.path,
+      savePath: target,
+      onProgress: (got, total) {
+        if (total > 0) progress.value = got / total;
+      },
+    );
+
+    if (dialogOpen && mounted) Navigator.of(context).maybePop();
+    progress.dispose();
+    if (!mounted) return;
+
+    if (!r.ok) {
+      try {
+        final f = File(target);
+        if (f.existsSync()) f.deleteSync();
+      } catch (_) {}
+      _toast('下载失败：${r.friendlyError}');
+      return;
+    }
+    _toast('已保存到 $target');
   }
 
   Future<String?> _askText(String title, String hint, {String initial = ''}) {
@@ -628,7 +727,27 @@ class _FileBrowserPageState extends State<FileBrowserPage> {
                   ],
                 ),
               ),
-              DshIcon(DshGlyph.more, size: 18, color: c.textTertiary),
+              /*
+               * 三个点**必须是真按钮**。
+               *
+               * 之前这里只是一个装饰性的 DshIcon —— 长得像菜单按钮，点了却什么都没发生
+               * （动作只挂在整行的长按上）。用户原话：「明明文件后面有三个点，
+               * 但是点击没有任何反应，反而是长按文件才会打开窗口」。
+               *
+               * 现在：点它 = 打开同一个操作菜单，长按整行也照旧（两条路都通）。
+               * 尺寸给足 40×40，符合可点区域的最小值。
+               */
+              SizedBox(
+                width: 40,
+                height: 40,
+                child: IconButton(
+                  onPressed: () => _showMenu(e),
+                  tooltip: '更多操作',
+                  padding: EdgeInsets.zero,
+                  visualDensity: VisualDensity.compact,
+                  icon: DshIcon(DshGlyph.more, size: 18, color: c.textSecondary),
+                ),
+              ),
             ],
           ),
         ),
@@ -709,7 +828,7 @@ class _FileBrowserPageState extends State<FileBrowserPage> {
                 ),
                 title: Text('下载到本地', style: TextStyle(color: c.textPrimary)),
                 subtitle: Text(
-                  '存到手机 Download 目录',
+                  '交给系统下载器（浏览器里看进度，最快）',
                   style: TextStyle(fontSize: 11.5, color: c.textTertiary),
                 ),
                 onTap: () {
