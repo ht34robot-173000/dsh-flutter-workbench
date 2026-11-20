@@ -13,6 +13,7 @@ library;
 import 'dart:convert';
 
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 
 import 'prefs.dart';
 
@@ -61,6 +62,11 @@ class DshApi {
   final Prefs prefs;
   late Dio _dio;
 
+  /// 请求打点。默认关闭，排查「切个主题怎么又发请求了」这类问题时打开：
+  ///   `flutter build apk --dart-define=DSH_API_TRACE=true`
+  /// 然后 `adb logcat | Select-String '\[api\]'` 就能看到每一次 `/rw/api/*`。
+  static const bool trace = bool.fromEnvironment('DSH_API_TRACE');
+
   DshApi(this.prefs) {
     _dio = Dio(BaseOptions(
       connectTimeout: const Duration(seconds: 15),
@@ -89,6 +95,7 @@ class DshApi {
 
   /// 真正的 `/rw/api/<method>` 调用。
   Future<ApiResult> api(String method, [Map<String, dynamic> body = const {}]) async {
+    if (trace) debugPrint('[api] $method');
     final url = '/rw/api/$method';
     try {
       final res = await _dio.post(url, data: jsonEncode(body));

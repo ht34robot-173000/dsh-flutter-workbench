@@ -15,6 +15,8 @@ library;
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 
 import '../data/installer.dart';
@@ -87,7 +89,7 @@ class _UpdatePageState extends State<UpdatePage> {
   /// ⚠️ 不能读 `widget.repo` / `widget.apiBase` —— 那是 initState 时传进来的
   /// 初始值，用户改了输入框它们不会变。早先写成读 widget 的，结果：
   /// 配置区显示新仓库，但「检查更新」还在查旧仓库，报
-  /// 「仓库 173ababah/dsh-mobile 不存在」—— 用户看到的是「保存没生效」。
+  /// 「仓库 某个旧账号/旧仓库 不存在」—— 用户看到的是「保存没生效」。
   void _rebuildApi() {
     final repo = _repoCtrl.text.trim();
     final api = _apiCtrl.text.trim();
@@ -285,6 +287,97 @@ class _UpdatePageState extends State<UpdatePage> {
     if (n < 1024) return '$n B';
     if (n < 1024 * 1024) return '${(n / 1024).toStringAsFixed(1)} KB';
     return '${(n / 1024 / 1024).toStringAsFixed(1)} MB';
+  }
+
+  /// 精简 Release body：去掉下载区块（界面上已有「下载」按钮）和末尾的源码链接。
+  ///
+  /// 为什么要在客户端裁剪：Release body 是给人看的完整说明，
+  /// 但 App 里空间有限，而且「下载」这件事已经由按钮承担了 ——
+  /// 再把两条 raw 链接和「本包含 xx 架构」之类的废话铺一遍纯属噪音。
+  ///
+  /// 实现用**按行扫描**而不是单个正则：
+  /// 正则 `#{1,4}(下载)[\s\S]*?(?=\n#{1,4})` 看着对，
+  /// 但 `[\s\S]*?` 在跨行前瞻上的行为很难调 —— 实测它会一路吃到底。
+  /// 按行判断「遇到同级/更高级标题就停」既直观又不会误伤正文。
+  static String _trimNotes(String raw) {
+    final lines = raw.split('\n');
+    final out = <String>[];
+    // 当前是否处在要丢弃的区块里
+    var skip = false;
+    var skipLevel = 0;
+
+    bool isHeading(String t) => RegExp(r'^#{1,6}\s').hasMatch(t);
+
+    int headingLevel(String t) {
+      final m = RegExp(r'^(#{1,6})\s').firstMatch(t);
+      return m == null ? 0 : m.group(1)!.length;
+    }
+
+    bool isNoiseHeading(String t) =>
+        RegExp(r'^#{1,6}\s*(下载|Download|源码|Source)(\s|$)', caseSensitive: false)
+            .hasMatch(t);
+
+    for (final line in lines) {
+      final t = line.trim();
+
+      if (isHeading(t)) {
+        if (skip) {
+          // 遇到同级或更高级标题 → 区块结束
+          if (headingLevel(t) <= skipLevel) skip = false;
+        }
+        if (!skip && isNoiseHeading(t)) {
+          skip = true;
+          skipLevel = headingLevel(t);
+          continue;
+        }
+        if (skip) continue;
+        out.add(line);
+        continue;
+      }
+
+      if (skip) continue;
+
+      // 裸的 GitHub 链接行去掉
+      if (t.isNotEmpty &&
+          (t.contains('github.com/') || t.contains('gh-proxy.com/'))) {
+        continue;
+      }
+      out.add(line);
+    }
+
+    var s = out.join('\n');
+    s = s.replaceAll(RegExp(r'\n{3,}'), '\n\n');
+    return s.trim();
+  }
+
+  /// Markdown 样式：压到 11.5px 正文，标题不抢戏。
+  static MarkdownStyleSheet _mdStyle(DshColors c) {
+    final base = TextStyle(fontSize: 11.5, height: 1.5, color: c.textSecondary);
+    return MarkdownStyleSheet(
+      p: base,
+      h1: base.copyWith(fontSize: 14, fontWeight: FontWeight.bold, color: c.textPrimary),
+      h2: base.copyWith(fontSize: 13, fontWeight: FontWeight.bold, color: c.textPrimary),
+      h3: base.copyWith(fontSize: 12, fontWeight: FontWeight.bold, color: c.textPrimary),
+      listBullet: base,
+      strong: base.copyWith(fontWeight: FontWeight.bold, color: c.textPrimary),
+      em: base.copyWith(fontStyle: FontStyle.italic),
+      code: TextStyle(
+        fontSize: 10.5,
+        fontFamily: 'monospace',
+        // ⚠️ 不要用 accent 色。accent 是链接色，行内代码染成那个颜色后
+        // 看起来和可点链接一模一样，用户会去点（实测反馈过）。
+        // 用主文字色 + 略深的底，靠形态区分而不是靠颜色。
+        color: c.textPrimary,
+        backgroundColor: c.stroke,
+      ),
+      codeblockDecoration: BoxDecoration(
+        color: c.winBg.withValues(alpha: 0.5),
+        borderRadius: BorderRadius.circular(4),
+      ),
+      a: base.copyWith(color: c.accent),
+      blockSpacing: 6,
+      listIndent: 14,
+    );
   }
 
   /* ---------------- 渲染 ---------------- */
@@ -523,19 +616,37 @@ class _UpdatePageState extends State<UpdatePage> {
           ],
           if (info.releaseNotes.trim().isNotEmpty) ...[
             const SizedBox(height: 10),
+            /*
+             * 更新说明要**渲染成 Markdown**，不能直接当纯文本显示。
+             *
+             * 踩过：原来直接用 Text() 显示，Release body 里的
+             * `## 标题`、`- [链接](url)` 全部原样露出来，
+             * 用户看到一堆 `##` 和裸 URL。
+             *
+             * 另外 Release body 可能很长（整个 CHANGELOG），
+             * 所以限高 + 可滚动，不把卡片撑爆。
+             */
             Container(
               width: double.infinity,
+              constraints: const BoxConstraints(maxHeight: 220),
               padding: const EdgeInsets.all(10),
               decoration: BoxDecoration(
                 color: c.inputFill,
                 borderRadius: BorderRadius.circular(8),
                 border: Border.all(color: c.stroke),
               ),
-              child: Text(
-                info.releaseNotes.trim(),
-                maxLines: 12,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(fontSize: 11.5, height: 1.45, color: c.textSecondary),
+              child: SingleChildScrollView(
+                child: MarkdownBody(
+                  data: _trimNotes(info.releaseNotes),
+                  styleSheet: _mdStyle(c),
+                  onTapLink: (text, href, title) {
+                    // 链接点了没反应会让人困惑，至少给个提示
+                    if (href != null) {
+                      Clipboard.setData(ClipboardData(text: href));
+                      _say('链接已复制：$href');
+                    }
+                  },
+                ),
               ),
             ),
           ],
@@ -662,5 +773,7 @@ class _UpdatePageState extends State<UpdatePage> {
     );
   }
 }
+
+
 
 

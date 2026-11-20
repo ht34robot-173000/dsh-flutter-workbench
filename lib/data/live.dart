@@ -40,6 +40,17 @@ class LiveClient {
   StreamSubscription? _lineSub;
   HttpClient? _client;
 
+  /// 当前这条流是否已经**交给过**调用方。
+  ///
+  /// ⚠️ 单订阅流（StreamController.stream）**一辈子只能 listen 一次**：
+  /// 即使上一个监听已经 cancel，再 listen 也会抛
+  /// `Bad state: Stream has already been listened to`。
+  ///
+  /// 实测后果：进对话页 → 返回 → 再进另一个对话页，整个页面直接崩成灰屏
+  /// （异常抛在 `initState` 里，界面只剩状态栏）。
+  /// 所以这里记一笔，交出去过就在下次 `connect()` 重新开一条。
+  bool _handed = false;
+
   LiveClient(this.prefs);
 
   /// 开始监听。
@@ -49,10 +60,23 @@ class LiveClient {
   /// 等 `listen()` 时一起冲出来，不会丢。（broadcast 控制器会直接丢弃。）
   Stream<LiveFrame> connect() {
     final existing = _ctrl;
-    if (existing != null && !existing.isClosed) return existing.stream;
+    if (existing != null && !existing.isClosed && !_handed) {
+      _handed = true;
+      return existing.stream;
+    }
+
+    // 上一条流已经被消费过（或已关闭）：旧的连根收掉，重新开一条。
+    if (existing != null && !existing.isClosed) {
+      unawaited(existing.close());
+    }
+    unawaited(_lineSub?.cancel());
+    _lineSub = null;
+    _client?.close(force: true);
+    _client = null;
 
     final ctrl = StreamController<LiveFrame>();
     _ctrl = ctrl;
+    _handed = true;
     _start(ctrl);
     return ctrl.stream;
   }
@@ -149,7 +173,8 @@ class LiveClient {
     );
   }
 
-  /// 关闭。**必须在页面 dispose 里调**，否则连接泄漏、后台还在收数据。
+  /// 关闭。**必须在页面 dispose 里调**，否则连接泄漏、后台还在收数据；
+  /// 更要紧的是：不关掉的话**下一条流没法重新开**（见 `_handed`）。
   Future<void> close() async {
     await _lineSub?.cancel();
     _lineSub = null;
@@ -157,6 +182,7 @@ class LiveClient {
     _client = null;
     final c = _ctrl;
     _ctrl = null;
+    _handed = false;
     if (c != null && !c.isClosed) await c.close();
   }
 }

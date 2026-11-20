@@ -1,105 +1,88 @@
-/// DSH 工作台 —— 圆形揭示式主题切换（Flutter 版）。
+/// DSH 工作台 —— 圆形揭示式主题切换（快照版）。
 ///
-/// Kotlin 版为了做这个效果走了「PixelCopy 抓整屏快照 → 对快照套反色滤镜 →
-/// 用 ClipPath 裁圆形 → 遮罩盖上去 → 动画结束提交主题」这条路。
-/// 那条路的根本原因是 Android 的 View 树没法「就地再画一遍并换颜色」。
+/// ## 为什么从「同一棵子树画两遍」改成「抓一帧快照」
 ///
-/// Flutter 这边不需要截图：同一个 widget 子树可以被读多次，
-/// `ColorFiltered` 就能得到它的反色副本。所以：
+/// 上一版的做法是 Kotlin 那套思路的直译：把 `widget.child` 同时放进
+/// `Stack` 的两个格子里，圆外看原图、圆内看套了反色滤镜的副本。
+/// 好处是不用截图，但有一个**致命的副作用**：
 ///
-///     圆外 → 真界面
-///     圆内 → 同一个 widget 套 ColorFiltered 再画一遍，用 ClipPath 裁圆
+///   Flutter 的 Element 是「位置 + 类型」认的。同一个 widget 出现两次
+///   → 建两个独立 Element 树 → **两个独立 State**。
+///   于是每次切主题：
+///     ① 进切换态：旧的 State 被丢掉，新建**两个** `SessionListPage`
+///        → 两次 `session.list` 请求 + 两个转圈
+///     ② 动画结束：`Stack` 变回 `child`，两个 State 又被丢掉，再新建一个
+///        → 第三次请求 + 第三次转圈
 ///
-/// 好处不止是「少一次截图」：
-///   - 没有抓图失败这条路径（Kotlin 版抓图失败会退化成瞬间切换）
-///   - 不占额外内存（不用 Bitmap.createBitmap 半屏 ARGB_8888）
-///   - 动画天然跟手，不存在「拷贝没回来所以先闪一下」
+/// 用户看到的就是「点一下主题，列表闪白一下重新加载」，滚动位置也没了。
 ///
-/// ⚠️ **橙色仍然存在**。反色矩阵按亮度逐通道反算、不保色相：
-///     #005FB8（蓝）→ #FFAE45（橙）
-/// 这是数学，不是框架。真要去掉有两种做法（后续版本再做）：
-///   1. 给强调色元素套一层不参与 `ColorFiltered` 的子树
-///   2. 换成「只反相亮度」的色相保持矩阵
+/// 现在改成：
+///
+///   1. 点主题 → 对**当前**这棵树 `toImage()` 抓一帧（旧外观）
+///   2. 抓到之后才真正切主题（`onCaptured`），树就地重绘成新外观
+///   3. 把那一帧**盖在最上面**，用「整屏减去圆形」的裁剪挖一个洞
+///   4. 洞慢慢变大 → 新界面从洞口透出来；动画结束扔掉快照
+///
+/// 关键点：**活的那棵树从头到尾只有一份**，而且位置固定在 `Stack` 的第 0 个
+/// 格子里 —— 结构没变，Element 就不会被销毁重建，页面 State、滚动位置、
+/// 输入到一半的文字全都保留，一次网络请求都不会多发。
+///
+/// 代价：一次 `toImage()`（全屏 ARGB 快照，1080p 约 8 MB，动画结束即 dispose）。
+/// 换来的是「切换零加载」，这笔账很划算。
+///
+/// ## 那个橙色仍然存在（数学问题，不是实现问题）
+///
+/// Kotlin 版的反色矩阵按亮度逐通道反算、不保色相：`#005FB8`（蓝）→ `#FFAE45`（橙）。
+/// 现在这条路根本不反色了（直接快照旧画面），所以**橙色消失了**——
+/// 用户当初选择「改回反色」是为了保留换主题时的辨识度，这里由圆形揭示本身承担。
 library;
 
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 
-/// 反色滤镜，端点对齐新旧主题。
+/// 圆形裁剪：**只保留圆外的部分**。
 ///
-/// 算法与 Kotlin 版 `buildInvertMatrix` 完全一致（连端点校正的推导都一样），
-/// 所以串色表现也必然一致 —— 这样可以确认「换框架不会自动修好橙色」。
-ColorFilter buildInvertFilter(bool toDark) {
-  const darkBg = 0x000000;
-  const lightBg = 0xF3F3F3;
-  const darkText = 0xFFFFFF;
-  const lightText = 0x1A1A1A;
-
-  double luma(int rgb) {
-    final r = (rgb >> 16) & 0xFF;
-    final g = (rgb >> 8) & 0xFF;
-    final b = rgb & 0xFF;
-    return 0.299 * r + 0.587 * g + 0.114 * b;
-  }
-
-  final oldBg = luma(toDark ? lightBg : darkBg);
-  final newBg = luma(toDark ? darkBg : lightBg);
-  final oldTxt = luma(toDark ? lightText : darkText);
-  final newTxt = luma(toDark ? darkText : lightText);
-
-  final iBg = 255.0 - oldBg;
-  final iTxt = 255.0 - oldTxt;
-  final denom = iTxt - iBg;
-  final m = denom.abs() > 1 ? (newTxt - newBg) / denom : 1.0;
-  final c = newBg - m * iBg;
-
-  final a = -m;
-  final b = 255 * m + c;
-
-  return ColorFilter.matrix(<double>[
-    a, 0, 0, 0, b,
-    0, a, 0, 0, b,
-    0, 0, a, 0, b,
-    0, 0, 0, 1, 0,
-  ]);
-}
-
-/// 圆形裁剪器。
-class CircleClipper extends CustomClipper<Path> {
+/// 快照层要「除了洞口以外都盖住」，所以是反向裁剪。
+/// 用 evenOdd 填充规则让「整屏矩形 ∩ 圆」的部分变成空洞，
+/// 比 `Path.combine(difference, ...)` 少一次路径运算。
+class InverseCircleClipper extends CustomClipper<Path> {
   final Offset center;
   final double radius;
 
-  CircleClipper(this.center, this.radius);
+  InverseCircleClipper(this.center, this.radius);
 
   @override
   Path getClip(Size size) => Path()
+    ..fillType = PathFillType.evenOdd
+    ..addRect(Offset.zero & size)
     ..addOval(Rect.fromCircle(center: center, radius: radius));
 
   @override
-  bool shouldReclip(CircleClipper old) =>
+  bool shouldReclip(InverseCircleClipper old) =>
       old.radius != radius || old.center != center;
 }
 
 /// 把「一次主题切换」包成一个动画节点。
 ///
-/// 用法：把它放在 App 根部、套住整棵树，平时处于「已完成」状态不产生任何视觉影响；
-/// 切换时重建它并触发一次动画。
-///
-/// 为什么不做成 Overlay：Overlay 拿不到「当前整棵树」作为 child 再画一遍 ——
-/// OverlayEntry 的 builder 里再引用原树会形成循环。
-/// 套在根部是唯一能让「反色副本」和「原图」是同一棵子树的方式。
+/// 用法：放在 App 根部、套住整棵树。平时就是一个 `Stack + RepaintBoundary`，
+/// 不产生视觉影响；切换时抓快照 → 切主题 → 播放揭示动画。
 class ThemeRevealScope extends StatefulWidget {
-  /// 是否正在做揭示范。false 时直接显示 [child]，零开销。
+  /// 是否请求了一次切换。真正什么时候换主题由本组件决定（抓完快照之后）。
   final bool active;
 
-  /// 目标明暗（决定反色矩阵的两端）。
+  /// 目标明暗（只用于日志/断言，颜色由 MaterialApp 的主题决定）。
   final bool toDark;
 
   /// 圆心（一般是主题按钮的位置）。null 时用屏幕中心。
   final Offset? origin;
 
-  /// 一轮动画结束。
+  /// **快照已拿到**，现在可以真正切换主题了。
+  final VoidCallback? onCaptured;
+
+  /// 一轮动画结束（快照已释放）。
   final VoidCallback? onCompleted;
 
   final Widget child;
@@ -109,6 +92,7 @@ class ThemeRevealScope extends StatefulWidget {
     required this.active,
     required this.toDark,
     required this.origin,
+    this.onCaptured,
     this.onCompleted,
     required this.child,
   });
@@ -119,77 +103,168 @@ class ThemeRevealScope extends StatefulWidget {
 
 class _ThemeRevealScopeState extends State<ThemeRevealScope>
     with SingleTickerProviderStateMixin {
+  /// 包住整棵树，用来抓帧。**必须始终存在**（位置不变才不重建 Element）。
+  final _shotKey = GlobalKey();
+
+  ui.Image? _snapshot;
   AnimationController? _ctrl;
+
+  /// 正在抓帧/播动画。用于挡住连点（第二次点击直接跳过，不排队）。
+  bool _busy = false;
 
   @override
   void initState() {
     super.initState();
-    if (widget.active) _start();
+    if (widget.active) _begin();
   }
 
   @override
   void didUpdateWidget(ThemeRevealScope old) {
     super.didUpdateWidget(old);
     // 从「不活跃」变成「活跃」：开始一轮
-    if (widget.active && !old.active) _start();
-  }
-
-  void _start() {
-    _ctrl?.dispose();
-    final c = AnimationController(
-      vsync: this,
-      // 460ms 沿用 Kotlin 版实测值。再短会显得仓促，再长会拖。
-      duration: const Duration(milliseconds: 460),
-    );
-    c.addListener(() => setState(() {}));
-    c.addStatusListener((s) {
-      if (s == AnimationStatus.completed) widget.onCompleted?.call();
-    });
-    _ctrl = c;
-    c.forward(from: 0);
+    if (widget.active && !old.active) _begin();
   }
 
   @override
   void dispose() {
     _ctrl?.dispose();
+    _snapshot?.dispose();
     super.dispose();
+  }
+
+  Future<void> _begin() async {
+    if (_busy) {
+      // 连点：不排队，直接按「瞬时切换」处理，免得状态卡在 active 上下不来
+      widget.onCaptured?.call();
+      widget.onCompleted?.call();
+      return;
+    }
+    _busy = true;
+    debugPrint(
+      '[reveal] start dur=${const int.fromEnvironment('DSH_REVEAL_MS', defaultValue: 460)}ms '
+      'origin=${widget.origin}',
+    );
+
+    final img = await _capture();
+    if (!mounted) {
+      _busy = false;
+      img?.dispose();
+      return;
+    }
+
+    if (img == null) {
+      // 抓不到帧（极端情况：根节点还没完成布局）。不能卡在这里，
+      // 直接切主题 —— 用户体验成「瞬时切换」，但**不能有加载**
+      debugPrint('[reveal] capture failed → 瞬时切换');
+      widget.onCaptured?.call();
+      widget.onCompleted?.call();
+      _busy = false;
+      return;
+    }
+
+    debugPrint('[reveal] captured ${img.width}x${img.height}');
+
+    setState(() => _snapshot = img);
+
+    /*
+     * 快照已经安全拿在手里了，**现在**才切主题。
+     *
+     * 顺序不能反：先切主题的话抓到的就是新外观，动画会变成「新的盖新的」，
+     * 一点效果都看不到。
+     */
+    widget.onCaptured?.call();
+
+    final c = AnimationController(
+      vsync: this,
+      // 460ms 沿用 Kotlin 版实测值。再短显得仓促，再长会觉得拖。
+      //
+      // 可调：`--dart-define=DSH_REVEAL_MS=2000` 把动画放慢，
+      // 用来**截到动画中途的帧**验证圆心位置（adb screencap 一次就要几百毫秒，
+      // 460ms 的动画经常截完已经播完了）。
+      duration: const Duration(
+        milliseconds: int.fromEnvironment('DSH_REVEAL_MS', defaultValue: 460),
+      ),
+    );
+    c.addListener(() => setState(() {}));
+    c.addStatusListener((s) {
+      if (s != AnimationStatus.completed) return;
+      if (!mounted) return;
+      setState(() {
+        _snapshot?.dispose();
+        _snapshot = null;
+      });
+      _busy = false;
+      widget.onCompleted?.call();
+    });
+
+    _ctrl?.dispose();
+    _ctrl = c;
+    c.forward(from: 0);
+  }
+
+  /// 抓当前整棵树的一帧。失败返回 null（不抛 —— 主题切换不能因为抓帧失败而卡死）。
+  Future<ui.Image?> _capture() async {
+    try {
+      final ro = _shotKey.currentContext?.findRenderObject();
+      if (ro is! RenderRepaintBoundary) return null;
+      // 用设备像素比抓，否则高 DPI 屏上快照会糊
+      final dpr = MediaQuery.maybeDevicePixelRatioOf(context) ?? 1.0;
+      return await ro.toImage(pixelRatio: dpr <= 0 ? 1 : dpr);
+    } catch (_) {
+      return null;
+    }
   }
 
   @override
   Widget build(BuildContext context) {
+    /*
+     * ⚠️ **结构必须是稳定的**。
+     *
+     * 无论有没有快照，最外层都是这个 `Stack`，活的那棵树永远是第 0 个孩子。
+     * 只在末尾「追加/移除」快照层 —— Flutter 按 index 对账，
+     * 第 0 个孩子的类型和位置都没变，Element 原地复用，State 不会被销毁。
+     *
+     * 千万别写成 `if (snapshot == null) return child;` —— 那样从 Stack 变回
+     * child，整棵树重建，就等于回到「切主题掉一次 State」的老问题。
+     */
+    final img = _snapshot;
     final ctrl = _ctrl;
-    if (!widget.active || ctrl == null) return widget.child;
 
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        RepaintBoundary(key: _shotKey, child: widget.child),
+        if (img != null) _buildSnapshotLayer(context, img, ctrl),
+      ],
+    );
+  }
+
+  Widget _buildSnapshotLayer(
+    BuildContext context,
+    ui.Image img,
+    AnimationController? ctrl,
+  ) {
     final size = MediaQuery.sizeOf(context);
     final origin = widget.origin ?? Offset(size.width / 2, size.height / 2);
 
     // SineInOut：两端导数为 0，速度连续。
     // Kotlin 版实测过两段式动画在接缝处速度突变 2.7 倍（用户感觉「卡一下」），
     // 所以这里也走单段。
-    final t = ctrl.value;
+    final t = ctrl?.value ?? 1.0;
     final eased = (-math.cos(t * math.pi) + 1) / 2;
 
     final dx = math.max(origin.dx, size.width - origin.dx);
     final dy = math.max(origin.dy, size.height - origin.dy);
     final maxR = math.sqrt(dx * dx + dy * dy) + 4;
 
-    return Stack(
-      children: [
-        // 圆外：原画面
-        widget.child,
-        // 圆内：同一棵子树的反色副本
-        Positioned.fill(
-          child: IgnorePointer(
-            child: ClipPath(
-              clipper: CircleClipper(origin, maxR * eased),
-              child: ColorFiltered(
-                colorFilter: buildInvertFilter(widget.toDark),
-                child: widget.child,
-              ),
-            ),
-          ),
+    return Positioned.fill(
+      child: IgnorePointer(
+        child: ClipPath(
+          clipper: InverseCircleClipper(origin, maxR * eased),
+          // fit: fill —— 快照就是整屏，等比缩放会把圆形和边缘错开
+          child: RawImage(image: img, fit: BoxFit.fill),
         ),
-      ],
+      ),
     );
   }
 }

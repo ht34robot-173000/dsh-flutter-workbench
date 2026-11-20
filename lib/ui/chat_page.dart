@@ -29,6 +29,7 @@ import '../data/chat_data.dart';
 import '../data/ds_api.dart';
 import '../data/live.dart';
 import 'icons.dart';
+import 'question_panel.dart';
 import 'theme.dart';
 
 class ChatPage extends StatefulWidget {
@@ -74,6 +75,18 @@ class _ChatPageState extends State<ChatPage> {
   bool _hasMore = false;
   double? _beforeSeq;
 
+  /// 提问面板的刷新信号。
+  ///
+  /// 面板**不能自己订阅 SSE**：`LiveClient.connect()` 是单订阅流，
+  /// 这里已经 listen 了，第二个监听会抛 `Stream has already been listened to`。
+  /// 所以由本页在「可能出了新提问」时递增这个计数器，面板的
+  /// `didUpdateWidget` 看到它变了就重新拉一次 `session.questions`。
+  int _questionsTick = 0;
+
+  /// 哪些「已回答提问」回执被展开了（按 seq 记）。
+  /// 默认**全部收起** —— 和桌面端一致，不铺一屏原始 JSON。
+  final _expandedReplies = <double>{};
+
   @override
   void initState() {
     super.initState();
@@ -86,6 +99,15 @@ class _ChatPageState extends State<ChatPage> {
   void dispose() {
     _scroll.removeListener(_onScroll);
     _liveSub?.cancel();
+    /*
+     * 必须把这条 SSE 流关掉。
+     *
+     * ⚠️ `LiveClient.connect()` 给的是**单订阅流**，一辈子只能 listen 一次。
+     * 只 cancel 不 close 的话，返回列表再进另一个对话页时，新页面的
+     * `initState` 里 listen 会抛 `Bad state: Stream has already been listened to`，
+     * 整页崩成灰屏（2026-11-20 实测：连开第三个会话必现）。
+     */
+    unawaited(widget.live.close());
     _input.dispose();
     _scroll.dispose();
     super.dispose();
@@ -175,15 +197,36 @@ class _ChatPageState extends State<ChatPage> {
           if (sessionId.isEmpty) return;
           if (sessionId != widget.sessionId) return;
           setState(() => _running = running);
+          // 一轮结束时提问可能刚被 settle 或刚转成可补答 —— 顺手让面板对一次账
+          if (!running) _bumpQuestions();
           // 注意：**不要**在这里 clear _streamBuf。
           // 宿主把 status:false 发得比 assistant/message 早一点点，
           // 先清就会把已经流出来的字擦掉，然后正式消息又还没到 ——
           // 界面上会闪一下空白。清理统一在 assistant/message 到达时做。
         case LiveEvent(:final sessionId, :final event):
           if (sessionId != widget.sessionId) return;
+          final type = (event['type'] ?? '').toString();
+
+          /*
+           * 提问出现时立刻让面板去拉一次。
+           *
+           * ⚠️ 这个判断必须放在下面 `m == null → return` **之前**：
+           * `tool/call` 不是消息事件，`ChatMessage.fromEvent` 对它返回 null，
+           * 放到后面就永远走不到，面板只能等用户手动刷新。
+           *
+           * 只认 `ask_user_question` 这一个名字 —— 每个工具调用都去拉一次
+           * 会在这条 0.86 MB/s 的上行上白费请求。
+           * 「open → continued」那一跳不在这里管（那需要 tool/result，
+           * 而 tool/result 太频繁），交给面板自己的 5 秒轮询。
+           */
+          if (type == 'tool/call') {
+            final data = event['data'];
+            final name = (data is Map) ? (data['name'] ?? '').toString() : '';
+            if (name == 'ask_user_question') _bumpQuestions();
+          }
+
           final m = ChatMessage.fromEvent(event);
           if (m == null) return;
-          final type = (event['type'] ?? '').toString();
           setState(() {
             /*
              * 只在 **assistant/message** 到达时清流式缓冲。
@@ -353,6 +396,12 @@ class _ChatPageState extends State<ChatPage> {
 
   /* ---------------- 渲染 ---------------- */
 
+  /// 让提问面板重新拉一次。面板用 `refreshTick` 变化来判断，不做重复请求。
+  void _bumpQuestions() {
+    if (!mounted) return;
+    setState(() => _questionsTick++);
+  }
+
   @override
   Widget build(BuildContext context) {
     final c = DshColors.of(widget.dark);
@@ -373,6 +422,21 @@ class _ChatPageState extends State<ChatPage> {
               children: [
                 _buildAppBar(c),
                 Expanded(child: _buildList(c)),
+                /*
+                 * 提问面板夹在消息列表和输入框之间。
+                 *
+                 * 放在这里而不是塞进 ListView 尾部：它必须**始终可见**
+                 * （agent 正阻塞等人回答，用户翻到上面去看历史时也应该看见），
+                 * 而且塞进 builder 列表里的话，滚出屏幕被回收，
+                 * 用户填了一半的输入会因为 `TextEditingController` 一并销毁而丢失。
+                 */
+                QuestionPanel(
+                  api: widget.api,
+                  sessionId: widget.sessionId,
+                  dark: widget.dark,
+                  refreshTick: _questionsTick,
+                  onAnswered: () => _scrollToBottom(),
+                ),
                 _buildComposer(c),
               ],
             ),
@@ -499,6 +563,14 @@ class _ChatPageState extends State<ChatPage> {
   }
 
   Widget _bubble(DshColors c, ChatMessage m) {
+    // 「已回答提问」的回执走另一套渲染：默认收起，一行摘要，点开才看详情。
+    // 按普通气泡渲染的话，正文是一整段 `{"kind":"answer_to_pending_question"...}`
+    // 的原始 JSON，一屏都放不下（桌面端也不是这么显示的）。
+    if (m.isQuestionReply) return _replyBubble(c, m);
+    // 宿主注入的环境上下文（指令 / 技能目录 / 运行时快照）同样收起：
+    // 这些动辄几千字，铺开会把真正的对话挤没（桌面端默认不显示）。
+    if (m.isContext) return _contextBubble(c, m);
+
     final isUser = m.role == 'user';
     return Padding(
       padding: const EdgeInsets.only(bottom: 10),
@@ -586,6 +658,295 @@ class _ChatPageState extends State<ChatPage> {
         ],
       ),
     );
+  }
+
+  /// 「已回答提问」回执：默认收起的一行卡片。
+  ///
+  /// 为什么必须单独做：宿主把答复 steer 回来的那条 user/message，
+  /// 正文是
+  ///   {"kind":"answer_to_pending_question","tool":"ask_user_question",
+  ///    "callId":"call_...","questions":[{"id","question","header",
+  ///    "options":[...],"multiSelect"}...],"answers":[{"id","selected","custom"}]}
+  /// 按普通气泡渲染就是**一屏原始 JSON**，还会把题目/选项/描述全部重复一遍。
+  /// 桌面端是默认隐藏的，手机这边对齐：收起 → 一行摘要；点开 → 题→答两行。
+  Widget _replyBubble(DshColors c, ChatMessage m) {
+    final expanded = _expandedReplies.contains(m.seq);
+    final reply = m.reply;
+    final lines = reply?.lines ?? const <QuestionReplyLine>[];
+
+    // 收起时的摘要：把这批回答压成一行，`火锅、饺子 · 2130`
+    final summary = lines.isEmpty
+        ? (reply?.raw != null ? '（原始内容）' : m.text)
+        : lines.map((l) => l.answer).join(' · ');
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Flexible(
+            child: Container(
+              constraints: BoxConstraints(
+                maxWidth: MediaQuery.sizeOf(context).width * 0.86,
+              ),
+              decoration: BoxDecoration(
+                color: c.cardSolid,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: c.stroke),
+              ),
+              child: Material(
+                color: Colors.transparent,
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(10),
+                  onTap: () => setState(() {
+                    if (!_expandedReplies.remove(m.seq)) {
+                      _expandedReplies.add(m.seq);
+                    }
+                  }),
+                  child: Padding(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 11, vertical: 9),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Row(
+                          children: [
+                            DshIcon(DshGlyph.check, size: 13, color: c.success),
+                            const SizedBox(width: 6),
+                            Text(
+                              '已回答 DSH 提问',
+                              style: TextStyle(
+                                fontSize: 12.5,
+                                fontWeight: FontWeight.w600,
+                                color: c.textSecondary,
+                              ),
+                            ),
+                            if (lines.isNotEmpty) ...[
+                              const SizedBox(width: 6),
+                              Text(
+                                '${lines.length} 题',
+                                style: TextStyle(
+                                  fontSize: 10.5,
+                                  color: c.textTertiary,
+                                ),
+                              ),
+                            ],
+                            const SizedBox(width: 6),
+                            Icon(
+                              expanded
+                                  ? Icons.expand_less
+                                  : Icons.expand_more,
+                              size: 16,
+                              color: c.textTertiary,
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 3),
+                        /*
+                         * 收起态也要给出「答了什么」—— 只写「已回答」等于什么都没说，
+                         * 用户还得点开才知道自己（或手机）回了什么。
+                         * 单行截断，不折行。
+                         */
+                        Text(
+                          summary,
+                          maxLines: expanded ? 6 : 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 12,
+                            height: 1.4,
+                            color: c.textPrimary,
+                          ),
+                        ),
+                        if (expanded) ...[
+                          const SizedBox(height: 7),
+                          Divider(color: c.stroke, height: 1),
+                          const SizedBox(height: 7),
+                          if (lines.isEmpty)
+                            // 解析失败（宿主格式变了）时兜底：给原文，
+                            // 但要限高 + 内部滚动，别再把整屏占满
+                            ConstrainedBox(
+                              constraints: const BoxConstraints(maxHeight: 160),
+                              child: SingleChildScrollView(
+                                child: Text(
+                                  m.text,
+                                  style: TextStyle(
+                                    fontSize: 10.5,
+                                    height: 1.4,
+                                    color: c.textTertiary,
+                                  ),
+                                ),
+                              ),
+                            )
+                          else
+                            for (var i = 0; i < lines.length; i++)
+                              Padding(
+                                padding: EdgeInsets.only(
+                                  bottom: i == lines.length - 1 ? 0 : 6,
+                                ),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      '${i + 1}. ${lines[i].question}',
+                                      style: TextStyle(
+                                        fontSize: 11.5,
+                                        height: 1.35,
+                                        color: c.textTertiary,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 1),
+                                    Text(
+                                      lines[i].answer,
+                                      style: TextStyle(
+                                        fontSize: 12.5,
+                                        height: 1.35,
+                                        fontWeight: FontWeight.w600,
+                                        color: c.accent,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                        ],
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 宿主注入的环境上下文（AGENTS.md 指令 / 技能目录 / 运行时快照）。
+  ///
+  /// 实测长度：`agent-instructions` 6838 字、`skill-catalog` 5615 字、
+  /// `runtime-context` 409 字。按普通气泡渲染就是**好几屏英文系统提示**，
+  /// 把真正的对话挤得一点不剩（桌面端默认是不显示的）。
+  ///
+  /// 这里做成一行小卡片：`ℹ 技能目录 · 5615 字 ⌄` + 一句话摘要，
+  /// 点开才看原文，且限高 260 + 内部滚动 —— 不允许再把整屏占满。
+  Widget _contextBubble(DshColors c, ChatMessage m) {
+    final expanded = _expandedReplies.contains(m.seq);
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Flexible(
+            child: Container(
+              constraints: BoxConstraints(
+                maxWidth: MediaQuery.sizeOf(context).width * 0.86,
+              ),
+              decoration: BoxDecoration(
+                color: c.cardBg,
+                borderRadius: BorderRadius.circular(9),
+                border: Border.all(color: c.stroke),
+              ),
+              child: Material(
+                color: Colors.transparent,
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(9),
+                  onTap: () => setState(() {
+                    if (!_expandedReplies.remove(m.seq)) {
+                      _expandedReplies.add(m.seq);
+                    }
+                  }),
+                  child: Padding(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Row(
+                          children: [
+                            DshIcon(
+                              DshGlyph.info,
+                              size: 12,
+                              color: c.textTertiary,
+                            ),
+                            const SizedBox(width: 5),
+                            Flexible(
+                              child: Text(
+                                m.contextLabel ?? '注入的上下文',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  fontSize: 11.5,
+                                  fontWeight: FontWeight.w600,
+                                  color: c.textSecondary,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 5),
+                            Text(
+                              '${m.text.length} 字',
+                              style: TextStyle(
+                                fontSize: 10,
+                                color: c.textTertiary,
+                              ),
+                            ),
+                            Icon(
+                              expanded
+                                  ? Icons.expand_less
+                                  : Icons.expand_more,
+                              size: 15,
+                              color: c.textTertiary,
+                            ),
+                          ],
+                        ),
+                        if (!expanded) ...[
+                          const SizedBox(height: 2),
+                          Text(
+                            _firstMeaningfulLine(m.text),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: c.textTertiary,
+                            ),
+                          ),
+                        ] else ...[
+                          const SizedBox(height: 6),
+                          ConstrainedBox(
+                            constraints: const BoxConstraints(maxHeight: 260),
+                            child: SingleChildScrollView(
+                              child: Text(
+                                m.text,
+                                style: TextStyle(
+                                  fontSize: 10.5,
+                                  height: 1.45,
+                                  color: c.textTertiary,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 摘要行：跳过 `</system-reminder>` 这类标签行，取第一句人话。
+  static String _firstMeaningfulLine(String text) {
+    for (final line in text.split('\n')) {
+      final t = line.trim();
+      if (t.isEmpty || t.startsWith('<')) continue;
+      return t;
+    }
+    return '（无摘要，点开查看）';
   }
 
   Widget _buildComposer(DshColors c) {

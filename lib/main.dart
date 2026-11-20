@@ -4,6 +4,8 @@
 /// 才往下走。当前进度见 [MigrationStage]。
 library;
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import 'data/ds_api.dart';
@@ -17,6 +19,7 @@ import 'ui/scan_page.dart';
 import 'ui/update_page.dart';
 import 'ui/icons.dart';
 import 'data/session_data.dart';
+import 'data/session_store.dart';
 import 'ui/session_list_page.dart';
 import 'ui/theme.dart';
 import 'ui/theme_reveal.dart';
@@ -95,14 +98,27 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// 动画结束：真正落盘并重绘。
+  /// 主题揭示动画要的「抓帧已完成」信号 —— **此时才真正换主题**。
+  ///
+  /// 顺序很关键：先抓帧（旧外观）→ 再换主题 → 快照盖在上面挖洞揭示。
+  /// 反过来做，抓到的就是新外观，动画会变成「新的盖新的」，什么都看不见。
+  ///
+  /// 注意这里**不清 `revealOrigin`**：动画还在用那个圆心，
+  /// 中途清掉会让圆形从屏幕中心重新开始。
   Future<void> commitTheme() async {
     final target = revealToDark;
     if (target == null) return;
     dark = target;
     revealToDark = null;
-    revealOrigin = null;
     await prefs.setDark(dark);
+    notifyListeners();
+  }
+
+  /// 动画播完（快照已释放）。只回收圆心，不再动主题。
+  void finishReveal() {
+    if (revealOrigin == null && revealToDark == null) return;
+    revealOrigin = null;
+    revealToDark = null;
     notifyListeners();
   }
 
@@ -117,6 +133,8 @@ class AppState extends ChangeNotifier {
     api.reload();
     // 文件接口是独立实例，地址变了它也要跟着切
     fsApi.reload();
+    // 缓存里的列表属于**上一台服务器**，必须扔掉，否则会显示别人的会话
+    SessionStore.instance.reset();
     notifyListeners();
     await checkConnection();
   }
@@ -124,7 +142,11 @@ class AppState extends ChangeNotifier {
   /// 用 6 位码配对（沿用当前已保存的地址）。
   Future<ApiResult> pair(String code) async {
     final r = await api.acceptPair(code);
-    if (r.ok) await checkConnection();
+    if (r.ok) {
+      // 换了设备凭据 → 能看到的会话可能不同，缓存作废
+      SessionStore.instance.reset();
+      await checkConnection();
+    }
     return r;
   }
 
@@ -143,10 +165,14 @@ class AppState extends ChangeNotifier {
       }
       api.reload();
       fsApi.reload();
+      SessionStore.instance.reset();
       notifyListeners();
     }
     final r = await api.acceptPair(scan.code);
-    if (r.ok) await checkConnection();
+    if (r.ok) {
+      SessionStore.instance.reset();
+      await checkConnection();
+    }
     return r;
   }
 }
@@ -212,7 +238,9 @@ class _DshWorkbenchAppState extends State<DshWorkbenchApp> {
               active: _state.revealToDark != null,
               toDark: _state.revealToDark ?? false,
               origin: _state.revealOrigin,
-              onCompleted: _state.commitTheme,
+              // 抓帧完成才换主题；动画播完只回收圆心
+              onCaptured: _state.commitTheme,
+              onCompleted: _state.finishReveal,
               child: const HomePage(),
             ),
           );
@@ -268,19 +296,34 @@ class _HomePageState extends State<HomePage> {
       currentTab: _tab,
       onTab: (i) => setState(() => _tab = i),
       onMenu: () => _openSidebar(context),
-      onToggleTheme: () => _toggleTheme(context),
+      onToggleTheme: (origin) => state.toggleTheme(origin: origin),
       onSettings: () => Navigator.of(context).push(
         MaterialPageRoute(builder: (_) => const SettingsPage()),
       ),
-      body: _tab == 0
-          ? (ready
+      /*
+       * ⚠️ 用 IndexedStack 而不是 `_tab == 0 ? a : b` 三元。
+       *
+       * 三元写法每次切页签都会**销毁并重建**另一个页面 —— 会话列表要重新请求、
+       * 转一次圈、滚动位置回到顶部。IndexedStack 把两页都留在树上（只是不显示），
+       * 切回来是瞬时的。
+       *
+       * 代价：两页都会建一次。这里无所谓 —— 「我的」页是纯静态的，
+       * 会话列表的数据本来就要拉。
+       */
+      body: IndexedStack(
+        index: _tab,
+        sizing: StackFit.expand,
+        children: [
+          ready
               ? SessionListPage(
                   api: state.api,
                   dark: dark,
                   onOpenSession: (s) => _openChat(context, state, s, dark),
                 )
-              : _NotReady(dark: dark))
-          : _ProfilePlaceholder(dark: dark),
+              : _NotReady(dark: dark),
+          _ProfilePlaceholder(dark: dark),
+        ],
+      ),
     );
   }
 
@@ -290,7 +333,21 @@ class _HomePageState extends State<HomePage> {
     SessionItem s,
     bool dark,
   ) {
-    Navigator.of(context).push(
+    unawaited(_pushChat(context, state, s, dark));
+  }
+
+  /// 进对话页，**回来后静默刷新一次列表**。
+  ///
+  /// 为什么要刷新：刚聊过的会话标题 / 时间 / running 状态都变了，
+  /// 不刷新列表就是旧的。但这次刷新是**静默**的（store 里有数据时不显示转圈），
+  /// 也不会打断滚动位置 —— 用户感觉不到，数据却是新的。
+  Future<void> _pushChat(
+    BuildContext context,
+    AppState state,
+    SessionItem s,
+    bool dark,
+  ) async {
+    await Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => ChatPage(
           api: state.api,
@@ -301,16 +358,8 @@ class _HomePageState extends State<HomePage> {
         ),
       ),
     );
-  }
-
-  void _toggleTheme(BuildContext context) {
-    final state = AppScope.of(context);
-    final box = context.findRenderObject() as RenderBox?;
-    Offset? origin;
-    if (box != null) {
-      origin = box.localToGlobal(box.size.center(Offset.zero));
-    }
-    state.toggleTheme(origin: origin);
+    // 回来了：后台把列表对一次账（静默，不显示加载）
+    unawaited(SessionStore.instance.load(state.api, force: true));
   }
 
   void _openSidebar(BuildContext context) {
@@ -327,7 +376,17 @@ class _HomePageState extends State<HomePage> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            /*
+             * ⚠️ 每个 ListTile 都要显式 `titleAlignment: ListTileTitleAlignment.center`。
+             *
+             * 默认值是 `threeLine`/`top` 那一套：有 subtitle 时，
+             * leading 图标会被顶到整行的**顶部**，而文字块（title+subtitle）
+             * 整体比图标高 —— 视觉上就是「图标和文字没对齐，图标偏上」。
+             *
+             * 截图验证过：`文件管理` 那行的文件夹图标比文字高半行。
+             */
             ListTile(
+              titleAlignment: ListTileTitleAlignment.center,
               leading: DshIcon(DshGlyph.folder, size: 20, color: c.textPrimary),
               title: Text('文件管理', style: TextStyle(color: c.textPrimary)),
               subtitle: Text(
@@ -347,6 +406,7 @@ class _HomePageState extends State<HomePage> {
               },
             ),
             ListTile(
+              titleAlignment: ListTileTitleAlignment.center,
               leading: DshIcon(DshGlyph.settings, size: 20, color: c.textPrimary),
               title: Text('连接设置', style: TextStyle(color: c.textPrimary)),
               onTap: () {
@@ -357,6 +417,7 @@ class _HomePageState extends State<HomePage> {
               },
             ),
             ListTile(
+              titleAlignment: ListTileTitleAlignment.center,
               leading: DshIcon(DshGlyph.sync, size: 20, color: c.textPrimary),
               title: Text('检查更新', style: TextStyle(color: c.textPrimary)),
               subtitle: Text(
@@ -381,6 +442,7 @@ class _HomePageState extends State<HomePage> {
               },
             ),
             ListTile(
+              titleAlignment: ListTileTitleAlignment.center,
               leading: DshIcon(DshGlyph.info, size: 20, color: c.textTertiary),
               title: Text(
                 '轨迹将在后续阶段接入',
@@ -699,6 +761,7 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 }
+
 
 
 

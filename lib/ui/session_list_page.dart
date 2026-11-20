@@ -19,6 +19,7 @@ import 'package:flutter/material.dart';
 
 import '../data/ds_api.dart';
 import '../data/session_data.dart';
+import '../data/session_store.dart';
 import 'icons.dart';
 import 'theme.dart';
 
@@ -39,9 +40,11 @@ class SessionListPage extends StatefulWidget {
 }
 
 class _SessionListPageState extends State<SessionListPage> {
-  SessionListData? _data;
-  String? _error;
-  bool _loading = true;
+  /// 数据放在全局 store 里，**不在 State 里**。
+  ///
+  /// 这样即使这个页面被重建（切主题、切页签、返回再进），
+  /// 也能立刻画出上次的列表：不转圈、不闪、滚动位置由 ListView 自己保住。
+  final _store = SessionStore.instance;
 
   /// 折叠的分组。Kotlin 版落盘到 prefs.expandedWorkspaces，
   /// 这里先放内存 —— 阶段②只要求列表能用，持久化下一阶段补。
@@ -50,104 +53,87 @@ class _SessionListPageState extends State<SessionListPage> {
   @override
   void initState() {
     super.initState();
-    _load();
+    // 新鲜期内会短路，不会每次都打请求
+    _store.load(widget.api);
   }
 
-  Future<void> _load() async {
-    // 「加载中」只在首次显示。后续刷新走静默合并，
-    // 否则列表会闪一下、滚动位置跳到顶（踩坑文档 4.6）。
-    if (_data == null) {
-      setState(() {
-        _loading = true;
-        _error = null;
-      });
-    }
-    final r = await widget.api.api('session.list');
-    if (!mounted) return;
-    if (!r.ok) {
-      setState(() {
-        _loading = false;
-        _error = r.friendlyError;
-      });
-      return;
-    }
-    // 宿主返回两种形状都认：value 直接是数组，或 value.items
-    final v = r.value?['value'];
-    List<dynamic> raw = const [];
-    if (v is List) {
-      raw = v;
-    } else if (v is Map) {
-      final items = v['items'] ?? v['sessions'];
-      if (items is List) raw = items;
-    }
-    setState(() {
-      _loading = false;
-      _error = null;
-      _data = SessionListData.fromJson(raw);
-    });
-  }
+  Future<void> _load() => _store.load(widget.api, force: true);
 
   @override
   Widget build(BuildContext context) {
-    final c = DshColors.of(widget.dark);
+    /*
+     * 订阅 store：数据变了才重建。
+     *
+     * 三态的判据是**有没有数据**，不是「有没有在加载」：
+     *   - 没数据 + 在加载        → 转圈（只有这一种情况允许转圈）
+     *   - 没数据 + 有错误        → 错误页
+     *   - 有数据（哪怕正在刷新） → 直接画列表，静默更新
+     *
+     * 切主题时页面根本不会重建（快照方案见 theme_reveal.dart 头部），
+     * 就算哪天又被重建了，这里也是「零等待」直接出内容。
+     */
+    return ListenableBuilder(
+      listenable: _store,
+      builder: (context, _) {
+        final c = DshColors.of(widget.dark);
+        final data = _store.data;
 
-    if (_loading) {
-      return Center(child: CircularProgressIndicator(color: c.accent));
-    }
-    if (_error != null) {
-      return _ThreeState.error(
-        c: c,
-        message: _error!,
-        onRetry: _load,
-      );
-    }
-
-    final groups = _data!.grouped(const {});
-    if (groups.isEmpty) {
-      return _ThreeState.empty(c: c, message: '还没有会话');
-    }
-
-    // 用 ListView.builder 而不是把全部行塞进 children：
-    // 264 条会话全铺出来会一次性建大量 widget（踩坑文档 35）。
-    // 这里先把结构拍平成 (类型, 数据) 列表，再懒加载。
-    final rows = <_Row>[];
-    for (var gi = 0; gi < groups.length; gi++) {
-      final g = groups[gi];
-      final open = !_collapsed.contains(g.name);
-      if (gi > 0) rows.add(_Row.divider());
-      rows.add(_Row.group(g, open));
-      if (!open) continue;
-      rows.add(_Row.newSession());
-      for (final s in g.items) {
-        rows.add(_Row.session(s));
-      }
-    }
-
-    return RefreshIndicator(
-      color: c.accent,
-      onRefresh: _load,
-      child: ListView.builder(
-        // 不对齐 Kotlin 的 (8,4,8,8)：这里给一个读着舒服的边距，
-        // 但要显式写全四个值，否则 ListView 会自动叠加 MediaQuery 的 inset
-        padding: const EdgeInsets.fromLTRB(10, 4, 10, 12),
-        itemCount: rows.length,
-        itemBuilder: (context, i) {
-          final r = rows[i];
-          switch (r.kind) {
-            case _RowKind.divider:
-              return Padding(
-                padding: const EdgeInsets.only(top: 12, bottom: 4),
-                child: Container(height: 1, color: c.stroke),
-              );
-            case _RowKind.group:
-              return _groupHeader(c, r.group!, r.open!);
-            case _RowKind.newSession:
-              return _newSessionRow(c);
-            case _RowKind.session:
-              return _sessionCard(c, r.session!);
+        if (data == null) {
+          final err = _store.error;
+          if (err != null) {
+            return _ThreeState.error(c: c, message: err, onRetry: _load);
           }
-        },
-      ),
+          return Center(child: CircularProgressIndicator(color: c.accent));
+        }
+
+        final groups = data.grouped(const {});
+        if (groups.isEmpty) {
+          return _ThreeState.empty(c: c, message: '还没有会话');
+        }
+
+        // 用 ListView.builder 而不是把全部行塞进 children：
+        // 264 条会话全铺出来会一次性建大量 widget（踩坑文档 35）。
+        // 这里先把结构拍平成 (类型, 数据) 列表，再懒加载。
+        final rows = <_Row>[];
+        for (var gi = 0; gi < groups.length; gi++) {
+          final g = groups[gi];
+          final open = !_collapsed.contains(g.name);
+          if (gi > 0) rows.add(_Row.divider());
+          rows.add(_Row.group(g, open));
+          if (!open) continue;
+          rows.add(_Row.newSession());
+          for (final s in g.items) {
+            rows.add(_Row.session(s));
+          }
+        }
+
+        return RefreshIndicator(
+          color: c.accent,
+          onRefresh: _load,
+          child: ListView.builder(
+            // 不对齐 Kotlin 的 (8,4,8,8)：这里给一个读着舒服的边距，
+            // 但要显式写全四个值，否则 ListView 会自动叠加 MediaQuery 的 inset
+            padding: const EdgeInsets.fromLTRB(10, 4, 10, 12),
+            itemCount: rows.length,
+            itemBuilder: (context, i) {
+              final r = rows[i];
+              switch (r.kind) {
+                case _RowKind.divider:
+                  return Padding(
+                    padding: const EdgeInsets.only(top: 12, bottom: 4),
+                    child: Container(height: 1, color: c.stroke),
+                  );
+                case _RowKind.group:
+                  return _groupHeader(c, r.group!, r.open!);
+                case _RowKind.newSession:
+                  return _newSessionRow(c);
+                case _RowKind.session:
+                  return _sessionCard(c, r.session!);
+              }
+            },
+          ),
+        );
+      },
     );
   }
 

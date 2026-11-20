@@ -8,7 +8,10 @@ publish_to: 'none'
 # 阶段对应：
 #   0.1.0 —— 阶段① 连接与配对
 #   0.2.0 —— 阶段② 会话列表（Mica 背景 + 自有图标库）
-version: 0.7.2+702
+#   0.8.0 —— 阶段⑦ 手机端回答 DSH 提问（ask_user_question 卡片）
+#   0.8.1 —— 主题切换零加载（快照揭示）+ 会话列表缓存 + 页签保活
+#   0.8.2 —— 圆形揭示的圆心改到主题按钮本身（之前用的是整屏中心）
+version: 0.8.2+802
 
 environment:
   sdk: ^3.9.2
@@ -59,6 +62,9 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+
+
+
 
 
 

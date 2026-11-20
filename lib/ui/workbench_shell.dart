@@ -29,7 +29,11 @@ class WorkbenchShell extends StatelessWidget {
   final int currentTab;
   final ValueChanged<int> onTab;
   final VoidCallback onMenu;
-  final VoidCallback onToggleTheme;
+
+  /// 切主题。**回调会带上按钮自己的屏幕坐标**（圆心），
+  /// 圆形揭示就从按钮位置扩散开；拿不到坐标时给 null（退化成屏幕中心）。
+  final ValueChanged<Offset?> onToggleTheme;
+
   final VoidCallback onSettings;
 
   const WorkbenchShell({
@@ -86,7 +90,11 @@ class WorkbenchShell extends StatelessWidget {
               ),
             ),
           ),
-          _iconButton(DshGlyph.contrast, c.textPrimary, onToggleTheme),
+          _ThemeToggleButton(
+            glyph: DshGlyph.contrast,
+            color: c.textPrimary,
+            onTap: onToggleTheme,
+          ),
           _iconButton(DshGlyph.settings, c.textPrimary, onSettings),
         ],
       ),
@@ -167,6 +175,56 @@ class WorkbenchShell extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// 主题按钮：**自己上报屏幕坐标**，供圆形揭示定圆心。
+///
+/// 为什么不在外层调 `context.findRenderObject()`：那个 context 是整页的，
+/// 取到的是「整屏中心」—— 圆形就从屏幕正中间扩散，而不是从按钮扩散
+/// （用户当场指出的就是这个）。
+///
+/// 必须做成 StatefulWidget：`GlobalKey` 只在 State 里建一次才有稳定身份。
+/// 在 build 里现造 GlobalKey 会让元素每帧重新挂载，坐标也跟着抖。
+class _ThemeToggleButton extends StatefulWidget {
+  final DshGlyph glyph;
+  final Color color;
+  final ValueChanged<Offset?> onTap;
+
+  const _ThemeToggleButton({
+    required this.glyph,
+    required this.color,
+    required this.onTap,
+  });
+
+  @override
+  State<_ThemeToggleButton> createState() => _ThemeToggleButtonState();
+}
+
+class _ThemeToggleButtonState extends State<_ThemeToggleButton> {
+  final _key = GlobalKey();
+
+  void _handleTap() {
+    final ro = _key.currentContext?.findRenderObject();
+    Offset? center;
+    if (ro is RenderBox && ro.hasSize && ro.attached) {
+      // localToGlobal 给的是根视图坐标，和 ThemeRevealScope 里
+      // MediaQuery.sizeOf 的坐标系一致（都是逻辑像素、都从屏幕左上角算）
+      center = ro.localToGlobal(ro.size.center(Offset.zero));
+    }
+    widget.onTap(center);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton(
+      key: _key,
+      onPressed: _handleTap,
+      icon: DshIcon(widget.glyph, size: 20, color: widget.color),
+      constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      splashRadius: 20,
     );
   }
 }

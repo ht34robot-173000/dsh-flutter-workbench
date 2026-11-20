@@ -405,6 +405,7 @@ class _FileBrowserPageState extends State<FileBrowserPage> {
           mainAxisSize: MainAxisSize.min,
           children: [
             ListTile(
+              titleAlignment: ListTileTitleAlignment.center,
               leading: DshIcon(DshGlyph.folder, size: 20, color: c.textPrimary),
               title: Text('新建文件夹', style: TextStyle(color: c.textPrimary)),
               onTap: () {
@@ -413,6 +414,7 @@ class _FileBrowserPageState extends State<FileBrowserPage> {
               },
             ),
             ListTile(
+              titleAlignment: ListTileTitleAlignment.center,
               leading: DshIcon(DshGlyph.fileText, size: 20, color: c.textPrimary),
               title: Text('新建文件', style: TextStyle(color: c.textPrimary)),
               onTap: () {
@@ -421,6 +423,7 @@ class _FileBrowserPageState extends State<FileBrowserPage> {
               },
             ),
             ListTile(
+              titleAlignment: ListTileTitleAlignment.center,
               leading: DshIcon(DshGlyph.plus, size: 20, color: c.textPrimary),
               title: Text('上传文件', style: TextStyle(color: c.textPrimary)),
               subtitle: Text(
@@ -682,6 +685,7 @@ class _FileBrowserPageState extends State<FileBrowserPage> {
             ),
             if (!e.isDir) ...[
               ListTile(
+                titleAlignment: ListTileTitleAlignment.center,
                 leading: DshIcon(DshGlyph.cloud, size: 20, color: c.textPrimary),
                 title: Text('下载到本地', style: TextStyle(color: c.textPrimary)),
                 subtitle: Text(
@@ -694,6 +698,7 @@ class _FileBrowserPageState extends State<FileBrowserPage> {
                 },
               ),
               ListTile(
+                titleAlignment: ListTileTitleAlignment.center,
                 leading: DshIcon(DshGlyph.link, size: 20, color: c.textSecondary),
                 title: Text('复制下载链接', style: TextStyle(color: c.textSecondary)),
                 subtitle: Text(
@@ -707,6 +712,7 @@ class _FileBrowserPageState extends State<FileBrowserPage> {
               ),
             ],
             ListTile(
+              titleAlignment: ListTileTitleAlignment.center,
               leading: DshIcon(DshGlyph.edit, size: 20, color: c.textPrimary),
               title: Text('重命名', style: TextStyle(color: c.textPrimary)),
               onTap: () {
@@ -715,6 +721,7 @@ class _FileBrowserPageState extends State<FileBrowserPage> {
               },
             ),
             ListTile(
+              titleAlignment: ListTileTitleAlignment.center,
               leading: DshIcon(DshGlyph.delete, size: 20, color: c.danger),
               title: Text('删除', style: TextStyle(color: c.danger)),
               onTap: () {

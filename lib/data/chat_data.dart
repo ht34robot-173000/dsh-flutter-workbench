@@ -21,6 +21,118 @@ library;
 
 import 'dart:convert';
 
+/// 「已回答提问」的结构化内容。
+///
+/// 手机答完一道 `ask_user_question` 后，宿主会把答复作为一条 `user/message`
+/// steer 回 agent，`source.kind === 'user-question-reply'`，正文是一坨 JSON：
+///
+///   {"kind":"answer_to_pending_question","tool":"ask_user_question",
+///    "callId":"call_...",
+///    "questions":[{"id":"dinner","question":"今晚吃什么？","options":[...]}],
+///    "answers":[{"id":"dinner","selected":["火锅","饺子"]},
+///               {"id":"when","selected":[],"custom":"2130"}]}
+///
+/// 直接把它当普通气泡渲染，就是**一整屏的原始 JSON**（而且里面把题目、
+/// 选项、描述全重复了一遍）。桌面端不这么显示 —— 它是默认收起的。
+/// 所以这里解析成「题 → 答」两行，界面上只显示摘要。
+class QuestionReply {
+  /// 每题一行：题干 + 最终答案（选项或自定义输入）。
+  final List<QuestionReplyLine> lines;
+
+  /// 没能解析成结构化内容时（宿主格式变了），至少保留原文供展开查看。
+  final String? raw;
+
+  const QuestionReply({this.lines = const [], this.raw});
+
+  bool get isEmpty => lines.isEmpty;
+
+  /// 从答复正文里解析。不是这类消息 / 解析失败都返回 null。
+  static QuestionReply? tryParse(String text) {
+    final trimmed = text.trim();
+    if (!trimmed.startsWith('{')) return null;
+    Map<String, dynamic> j;
+    try {
+      final d = jsonDecode(trimmed);
+      if (d is! Map) return null;
+      j = d.cast<String, dynamic>();
+    } catch (_) {
+      return null;
+    }
+    if ((j['kind'] ?? '').toString() != 'answer_to_pending_question') return null;
+
+    // id → 题干（题目这边才有 question 文案，answer 那边只有 id）
+    final stems = <String, String>{};
+    final multi = <String, bool>{};
+    final qs = j['questions'];
+    if (qs is List) {
+      for (final q in qs) {
+        if (q is! Map) continue;
+        final id = (q['id'] ?? '').toString();
+        if (id.isEmpty) continue;
+        stems[id] = (q['question'] ?? id).toString();
+        multi[id] = q['multiSelect'] == true || q['multi_select'] == true;
+      }
+    }
+
+    final lines = <QuestionReplyLine>[];
+    final answers = j['answers'];
+    if (answers is List) {
+      for (final a in answers) {
+        if (a is! Map) continue;
+        final id = (a['id'] ?? '').toString();
+        if (id.isEmpty) continue;
+        final sel = <String>[];
+        final rawSel = a['selected'];
+        if (rawSel is List) {
+          for (final s in rawSel) {
+            if (s is String && s.isNotEmpty) sel.add(s);
+          }
+        }
+        final custom = (a['custom'] ?? '').toString();
+        lines.add(QuestionReplyLine(
+          question: stems[id] ?? id,
+          selected: sel,
+          custom: custom.isEmpty ? null : custom,
+        ));
+      }
+    }
+
+    // 有 answers 但题目文案拿不到（stems 为空）时也能显示，只是退化成 id
+    if (lines.isEmpty) return QuestionReply(raw: trimmed);
+    return QuestionReply(
+      lines: lines,
+      // 保留原文：展开时可以看一眼宿主到底收到了什么
+      raw: trimmed,
+    );
+  }
+}
+
+class QuestionReplyLine {
+  final String question;
+  final List<String> selected;
+  final String? custom;
+
+  const QuestionReplyLine({
+    required this.question,
+    this.selected = const [],
+    this.custom,
+  });
+
+  /// 一句话答案：
+  ///   单选 + 自定义 → 只显示自定义（custom 覆盖选项，此时 selected 为空）
+  ///   多选 + 自定义 → `火锅、饺子（补充：带上朋友）`
+  ///   什么都没答 → `（跳过）`
+  String get answer {
+    final c = custom;
+    if (c != null && c.isNotEmpty) {
+      if (selected.isEmpty) return c;
+      return '${selected.join('、')}（补充：$c）';
+    }
+    if (selected.isNotEmpty) return selected.join('、');
+    return '（跳过）';
+  }
+}
+
 /// 一条可显示的消息。
 class ChatMessage {
   /// 服务端事件序号。用于排序、去重、以及「加载更早」的游标。
@@ -43,6 +155,49 @@ class ChatMessage {
   /// 不用等 SSE 的 user/message 事件回来。等正式事件到了再按内容去重。
   final bool local;
 
+  /// 这条消息是「回答提问」的回执（`source.kind === 'user-question-reply'`）。
+  ///
+  /// 这种消息**不能按普通气泡渲染**：正文是整段 JSON（题目、选项、
+  /// 描述全都重复一遍），一屏放不下。界面改成默认收起的一行摘要。
+  final bool isQuestionReply;
+
+  /// 解析出来的题/答对。解析失败时为 null（仍按收起卡片显示，展开见原文）。
+  final QuestionReply? reply;
+
+  /// 这条消息的 `source.kind`。**决定它是不是「人说的话」**：
+  ///
+  ///   user                  → 用户真的打的字
+  ///   user-question-reply   → 手机/桌面答完提问后 steer 回来的回执（正文是 JSON）
+  ///   agent-instructions    → AGENTS.md 指令（实测一整块 6838 字）
+  ///   skill-catalog         → 技能目录（5615 字）
+  ///   runtime-context       → 运行时上下文快照
+  ///
+  /// 后三种是**宿主注入的环境上下文**，桌面端默认不展示成气泡。
+  /// 按普通气泡渲染的表现就是「一屏全是英文系统提示」，把真正的对话挤没了。
+  final String? sourceKind;
+
+  /// 是否是宿主注入的上下文（不是人说的话）。
+  ///
+  /// 只认已知的几种：**未知 kind 一律当普通消息显示**。
+  /// 宁可多显示一条，也不要把用户真的打的字藏起来。
+  bool get isContext => _contextKinds.contains(sourceKind);
+
+  static const _contextKinds = {
+    'agent-instructions',
+    'runtime-context',
+    'skill-catalog',
+    'skill-content',
+  };
+
+  /// 上下文卡片上的名字。
+  String? get contextLabel => switch (sourceKind) {
+        'agent-instructions' => 'AGENTS.md / 项目指令',
+        'runtime-context' => '运行时上下文',
+        'skill-catalog' => '技能目录',
+        'skill-content' => '技能内容',
+        _ => null,
+      };
+
   const ChatMessage({
     required this.seq,
     required this.role,
@@ -50,6 +205,9 @@ class ChatMessage {
     this.streaming = false,
     this.toolNames = const [],
     this.local = false,
+    this.isQuestionReply = false,
+    this.reply,
+    this.sourceKind,
   });
 
   ChatMessage copyWith({
@@ -66,6 +224,9 @@ class ChatMessage {
         streaming: streaming ?? this.streaming,
         toolNames: toolNames ?? this.toolNames,
         local: local ?? this.local,
+        isQuestionReply: isQuestionReply,
+        reply: reply,
+        sourceKind: sourceKind,
       );
 
   /// 从一条 session 事件里抠出消息。不是消息类事件就返回 null。
@@ -108,10 +269,24 @@ class ChatMessage {
     final seqRaw = ev['seq'];
     final seq = (seqRaw is num) ? seqRaw.toDouble() : 0.0;
 
+    /*
+     * 「回答提问」的回执要单独标出来。
+     *
+     * 它是一条正常的 user/message，正文却是整段 JSON
+     * （`{"kind":"answer_to_pending_question", ...}`）。按普通气泡渲染
+     * 就是一屏原始 JSON —— 桌面端不是这么显示的，默认是收起的。
+     * 这里只做识别 + 解析，怎么显示交给界面的 `_replyBubble`。
+     */
+    final src = msg['source'];
+    final srcKind = (src is Map) ? (src['kind'] ?? '').toString() : '';
+
     return ChatMessage(
       seq: seq,
       role: type == 'user/message' ? 'user' : 'assistant',
       text: text,
+      isQuestionReply: srcKind == 'user-question-reply',
+      reply: srcKind == 'user-question-reply' ? QuestionReply.tryParse(text) : null,
+      sourceKind: srcKind.isEmpty ? null : srcKind,
     );
   }
 }
