@@ -18,6 +18,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from gen_icon import BG_BOT, BG_TOP, draw_glyph, _lerp  # noqa: E402
+from font_strawberry import draw_text, text_width  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, "docs", "banner.png")
@@ -25,18 +26,8 @@ OUT = os.path.join(ROOT, "docs", "banner.png")
 W, H = 1600, 560
 RADIUS = 28
 
-FONT_BOLD = [r"C:\Windows\Fonts\msyhbd.ttc", r"C:\Windows\Fonts\segoeuib.ttf"]
-FONT_REG = [r"C:\Windows\Fonts\msyh.ttc", r"C:\Windows\Fonts\segoeui.ttf"]
-
-
-def load_font(paths, size):
-    for p in paths:
-        if os.path.exists(p):
-            try:
-                return ImageFont.truetype(p, size)
-            except OSError:
-                continue
-    return ImageFont.load_default()
+# 字体统一走 tool/font_strawberry.py（草莓字体 Aa 草莓可颂面包圆，
+# 加粗用 stroke 模拟 —— 这个字体只有单字重）。
 
 
 def bg(w, h):
@@ -93,25 +84,24 @@ def main() -> None:
     d = ImageDraw.Draw(canvas)
     x = 500
 
-    # —— 标题 ——
-    f_title = load_font(FONT_BOLD, 92)
-    d.text((x, 128), "DSH 工作台", font=f_title, fill=(255, 255, 255))
+    # —— 标题（加粗 = 草莓字体 + stroke）——
+    draw_text(d, (x, 128), "DSH 工作台", size=92, fill=(255, 255, 255), bold=True)
 
     # —— 副标题 ——
-    f_sub = load_font(FONT_REG, 36)
-    d.text(
+    draw_text(
+        d,
         (x + 4, 248),
         "手机端远控 DeepSeek Harness",
-        font=f_sub,
+        size=36,
         fill=(214, 226, 255),
     )
 
     # —— 一句话 ——
-    f_line = load_font(FONT_REG, 30)
-    d.text(
+    draw_text(
+        d,
         (x + 4, 306),
         "看实时输出 · 回消息 · 传文件 · 答提问 · 改主题",
-        font=f_line,
+        size=30,
         fill=(150, 178, 226),
     )
 
@@ -125,11 +115,10 @@ def main() -> None:
     chip_fill = (34, 58, 118)
     chip_line = (96, 134, 214)
     chip_text = (228, 238, 255)
-    f_chip = load_font(FONT_REG, 25)
     cx, cy = x + 4, 380
     pad_x, pad_y, gap = 20, 10, 12
     for text in chips:
-        tw = d.textlength(text, font=f_chip)
+        tw = text_width(d, text, size=25)
         w_chip = int(tw + pad_x * 2)
         h_chip = 48
         d.rounded_rectangle(
@@ -139,17 +128,17 @@ def main() -> None:
             outline=chip_line,
             width=1,
         )
-        d.text((cx + pad_x, cy + pad_y + 2), text, font=f_chip, fill=chip_text)
+        draw_text(d, (cx + pad_x, cy + pad_y + 2), text, size=25, fill=chip_text)
         cx += w_chip + gap
 
     # —— 右下角的 URL（右对齐，别顶到边）——
-    f_url = load_font(FONT_REG, 22)
     url = "github.com/ht34robot-173000/dsh-flutter-workbench"
-    url_w = d.textlength(url, font=f_url)
-    d.text(
+    url_w = text_width(d, url, size=22)
+    draw_text(
+        d,
         (W - url_w - 52, H - 54),
         url,
-        font=f_url,
+        size=22,
         fill=(128, 158, 208),
     )
 
